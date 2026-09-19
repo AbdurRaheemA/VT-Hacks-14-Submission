@@ -1,5 +1,9 @@
 # VT-Hacks-14-Submission
 
+## Backend
+
+The JavaScript backend includes a Nessie API wrapper and marketplace payment helpers. See [backend/README.md](backend/README.md) for setup and usage.
+
 ### Brainstorming
 College student focused marketplace where you can sell old books, furniture, clothes, etc.
 
