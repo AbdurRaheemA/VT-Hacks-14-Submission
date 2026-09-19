@@ -53,9 +53,18 @@ IDs are resolved by the backend and are never accepted from the browser.
 - `POST /api/listings/:id/purchase` resolves both users server-side and records
   a buyer purchase plus seller deposit through Nessie.
 
-This is hackathon-grade anonymous session authentication, not production student
-login. Production should replace it with the university identity provider while
-retaining the server-side user/customer/account mapping.
+Demo access is by name: `POST /api/session` with `{ "name": "John String" }`
+opens the same persisted app user and Nessie wallet on any device. Keep the
+returned cookie for subsequent wallet requests. Matching ignores case and extra
+spaces; simultaneous first requests create only one user in this single-server
+setup. Existing session cookies continue to work when another device connects.
+
+Saving an existing name in Profile switches to that user's profile and wallet.
+Saving an unused name renames the current user. New sessions with unused names
+create new users. Lookup uses this backend's persisted app-user records; it does
+not merge unrelated customers already present in Nessie. All devices must use
+the same backend and data file. This deliberately provides demo access without
+identity verification; anyone who knows a name can open that demo wallet.
 
 ## Raw Nessie wrapper
 

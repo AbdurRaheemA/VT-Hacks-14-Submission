@@ -19,6 +19,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     if (url === '/api/profile') {
       if (profileOffline) return new Response('', { status: 500 });
       const { profile } = JSON.parse(options.body);
+      if (profile.name.toLowerCase() === 'john string') return Response.json({ switched: true, user: { id: 'john-user', accountId: 'john-account' }, profile: { ...profile, name: 'John String', bio: 'Existing John profile' }, account: { id: 'john-account', balance: 675 } });
       return Response.json({ user: { id: 'user-1', customerId: 'customer-1', accountId: 'account-1' }, profile });
     }
     if (url === '/api/wallet/deposits') return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
@@ -62,7 +63,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(document.querySelectorAll('.product-card').length, 13);
     assert.equal(document.querySelectorAll('.dorm-arrivals-track .product-card').length, 5);
     assert.equal(document.querySelectorAll('.dorm-product-grid .product-card').length, 8);
-    assert.ok([...document.querySelectorAll('img')].every(img => img.getAttribute('src')?.includes('/assets/images/')));
+    assert.ok([...document.querySelectorAll('img')].every(img => img.getAttribute('src')?.includes('/assets/images/')), JSON.stringify([...document.querySelectorAll('img')].map(img => ({ alt: img.alt, src: img.getAttribute('src') }))));
     await click('[aria-label="Switch to dark mode"]');
     assert.equal(document.documentElement.dataset.theme, 'dark');
     assert.equal(JSON.parse(localStorage.getItem('dormio-theme')), 'dark');
@@ -211,6 +212,14 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(depositBody.amount, 25);
     assert.equal(depositBody.provider, 'venmo');
     assert.match(depositBody.checkoutId, /^test_[a-z0-9]{32}$/);
+    await click('[aria-label="Open profile settings"]');
+    await type('[name="name"]', 'John String');
+    await button('Save changes');
+    assert.match(document.querySelector('.dorm-user').textContent, /John String/);
+    assert.match(document.querySelector('.wallet-card').textContent, /\$675/, 'switching names replaces the wallet without subtracting prior demo purchases');
+    assert.equal(JSON.parse(localStorage.getItem('dormio-v1-transactions')).length, 0);
+    assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).bio, 'Existing John profile');
+    assert.equal(JSON.parse(localStorage.getItem('dormio-demo-state-user-1')).transactions.length > 0, true, 'previous user activity is retained separately');
   } finally {
     if (root) await act(async () => root.unmount());
     await server.close();

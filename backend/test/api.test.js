@@ -31,6 +31,42 @@ function cookieFrom(response) {
   return response.headers["set-cookie"].split(";")[0];
 }
 
+test('matching names on separate devices share one wallet and retain both sessions', async () => {
+  const { handler, calls } = fixture();
+  const [first, second] = await Promise.all([
+    invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'John String' } }),
+    invoke(handler, { method: 'POST', path: '/api/session', body: { name: '  john   STRING  ' } }),
+  ]);
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 200);
+  assert.equal(first.body.user.id, second.body.user.id);
+  assert.equal(calls.createUsers.length, 1);
+  assert.notEqual(cookieFrom(first), cookieFrom(second));
+  for (const session of [first, second]) {
+    const wallet = await invoke(handler, { path: '/api/wallet', cookie: cookieFrom(session) });
+    assert.equal(wallet.status, 200);
+    assert.equal(wallet.body.account.id, 'account-1');
+  }
+  const deposit = await invoke(handler, { method: 'POST', path: '/api/wallet/deposits', cookie: cookieFrom(second), body: { amount: 25, provider: 'venmo', checkoutId: 'shared_deposit_123' } });
+  assert.equal(deposit.status, 201);
+  assert.equal(calls.deposits[0][0], 'account-1');
+});
+
+test('saving an existing name switches wallet without renaming or overwriting either owner', async () => {
+  const { handler, calls } = fixture();
+  const john = await invoke(handler, { method: 'POST', path: '/api/session', body: { profile: { name: 'John String', bio: 'John bio' } } });
+  const alex = await invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'Alex Rivera' } });
+  const switched = await invoke(handler, { method: 'PUT', path: '/api/profile', cookie: cookieFrom(alex), body: { profile: { name: 'john string', bio: 'Alex bio' } } });
+  assert.equal(switched.status, 200);
+  assert.equal(switched.body.switched, true);
+  assert.equal(switched.body.user.id, john.body.user.id);
+  assert.equal(switched.body.profile.bio, 'John bio');
+  assert.equal(switched.body.account.id, 'account-1');
+  assert.equal(calls.updates.length, 0);
+  const original = await invoke(handler, { path: '/api/session', cookie: cookieFrom(alex) });
+  assert.equal(original.body.profile.name, 'Alex Rivera');
+});
+
 function fixture({ purchaseItem } = {}) {
   const calls = { createUsers: [], accountIds: [], updates: [], deposits: [], purchases: [] };
   const balances = new Map([

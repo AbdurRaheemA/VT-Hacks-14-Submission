@@ -1,4 +1,5 @@
 import { randomUUID, randomBytes, createHash } from "node:crypto";
+import { normalizeName } from './app-store.js';
 
 const testProviders = new Set(["stripe", "venmo", "paypal", "cashapp"]);
 const sessionCookieName = "dormio_session";
@@ -189,6 +190,19 @@ function validateListing(body) {
 
 export function createApiHandler({ nessie, marketplace, store, secureCookies = false }) {
   if (!store) throw new TypeError("store is required.");
+  // Serialize name resolution and session attachment in this single-process demo.
+  let identityQueue = Promise.resolve();
+  function identityChange(work) {
+    const result = identityQueue.then(work);
+    identityQueue = result.catch(() => {});
+    return result;
+  }
+  async function attachSession(user) {
+    const token = randomBytes(32).toString('hex');
+    const hash = createHash('sha256').update(token).digest('hex');
+    await store.updateUser(user.id, { sessionHashes: [...(user.sessionHashes || []), hash] });
+    return { 'set-cookie': sessionCookie(token, secureCookies) };
+  }
 
   async function currentUser(request) {
     const token = cookieValue(request, sessionCookieName);
@@ -210,17 +224,24 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
       }
 
       if (request.method === "POST" && url.pathname === "/api/session") {
+        const body = await readJson(request);
+        if (body.name !== undefined && (typeof body.name !== 'string' || !body.name.trim() || body.name.trim().length > 40)) {
+          throw new ApiError(400, 'name must contain between 1 and 40 characters.');
+        }
+        await identityChange(async () => {
         const existing = await currentUser(request);
-        if (existing) {
+        const profile = validateProfile(body.name !== undefined ? { name: body.name } : body.profile);
+        const matched = await store.getUserByName(profile.name);
+        const selected = body.name === undefined && existing ? existing : matched;
+        if (selected) {
           sendJson(response, 200, {
-            user: publicUser(existing),
-            profile: existing.profile,
-            ...(await walletSnapshot(nessie, existing.accountId)),
-          });
+            user: publicUser(selected),
+            profile: selected.profile,
+            ...(await walletSnapshot(nessie, selected.accountId)),
+          }, await attachSession(selected));
           return;
         }
 
-        const profile = validateProfile((await readJson(request)).profile);
         const created = await marketplace.createUser({
           customer: customerInput(profile),
           account: { nickname: "Dorm.io wallet", balance: 500 },
@@ -251,6 +272,7 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
           },
           { "set-cookie": sessionCookie(token, secureCookies) },
         );
+        });
         return;
       }
 
@@ -261,13 +283,24 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
       }
 
       if (request.method === "PUT" && url.pathname === "/api/profile") {
+        const body = await readJson(request);
+        await identityChange(async () => {
         const user = await requireUser(request);
-        const profile = validateProfile((await readJson(request)).profile);
-        if (profile.name !== user.profile.name) {
+        const profile = validateProfile(body.profile);
+        const matched = await store.getUserByName(profile.name);
+        if (matched && matched.id !== user.id) {
+          sendJson(response, 200, {
+            user: publicUser(matched), profile: matched.profile, switched: true,
+            ...(await walletSnapshot(nessie, matched.accountId)),
+          }, await attachSession(matched));
+          return;
+        }
+        if (normalizeName(profile.name) !== normalizeName(user.profile.name)) {
           await nessie.customers.update(user.customerId, customerInput(profile));
         }
         const updated = await store.updateUser(user.id, { profile, updatedAt: new Date().toISOString() });
         sendJson(response, 200, { user: publicUser(updated), profile: updated.profile });
+        });
         return;
       }
 

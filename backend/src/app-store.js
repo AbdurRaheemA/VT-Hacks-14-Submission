@@ -7,6 +7,8 @@ function copy(value) {
   return value === undefined ? undefined : structuredClone(value);
 }
 
+export const normalizeName = name => name.trim().replace(/\s+/g, ' ').toLowerCase();
+
 export function createAppStore({ filePath, initialState } = {}) {
   let state = initialState ? copy(initialState) : emptyState();
   let loading;
@@ -46,7 +48,11 @@ export function createAppStore({ filePath, initialState } = {}) {
   return Object.freeze({
     async getUserBySession(hash) {
       await load();
-      return copy(Object.values(state.users).find(user => user.sessionHash === hash));
+      return copy(Object.values(state.users).find(user => user.sessionHash === hash || user.sessionHashes?.includes(hash)));
+    },
+    async getUserByName(name) {
+      await load();
+      return copy(Object.values(state.users).find(user => normalizeName(user.profile.name) === normalizeName(name)));
     },
     async getUser(id) {
       await load();

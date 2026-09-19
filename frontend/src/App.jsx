@@ -58,11 +58,30 @@ export default function App() {
   const balance = (walletAccount?.balance ?? 500) - transactions.reduce((sum, tx) => sum + (tx.kind !== 'deposit' && !tx.serverSettled && (!tx.method || tx.method === 'wallet') && tx.status !== 'cancelled' ? tx.amount : 0), 0);
   const toastTimer = useRef();
   const showToast = text => { setToast(text); clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(''), 3500); };
+  const activateUser = user => {
+    const previousId = currentUser?.id || localStorage.getItem('dormio-active-user');
+    if (previousId && previousId !== user.id) {
+      localStorage.setItem(`dormio-demo-state-${previousId}`, JSON.stringify({ transactions, saved, messages, preferences, listings }));
+      const cached = JSON.parse(localStorage.getItem(`dormio-demo-state-${user.id}`) || 'null');
+      setTransactions(cached?.transactions || []);
+      setSaved(cached?.saved || []);
+      setMessages(cached?.messages || []);
+      setPreferences(cached?.preferences || { preferred: 'wallet', handles: {} });
+      setListings([
+        ...listings.filter(item => item.serverBacked).map(item => ({ ...item, own: item.sellerUserId === user.id })),
+        ...(cached?.listings || initialListings).filter(item => !item.serverBacked),
+      ]);
+      setActiveChat(null);
+      setMessageText('');
+    }
+    localStorage.setItem('dormio-active-user', user.id);
+    setCurrentUser(user);
+  };
   useEffect(() => {
     let active = true;
     bootstrapSession(profile).then(async ({ user, profile: serverProfile, account }) => {
       if (!active) return;
-      setCurrentUser(user);
+      activateUser(user);
       setProfile(current => ({ ...current, ...serverProfile, avatar: current.avatar }));
       setWalletAccount(account);
       setWalletConnectionError('');
@@ -110,10 +129,12 @@ export default function App() {
       setWalletAccount(session.account);
     }
     const result = await updateProfile(next);
-    setCurrentUser(result.user);
-    setProfile({ ...next, ...result.profile, avatar: next.avatar });
-    setListings(current => current.map(item => item.own ? { ...item, campus: next.campus, initials: next.name.charAt(0), location: next.pickup || 'On campus' } : item));
-    setModal(null); showToast('Profile updated.');
+    activateUser(result.user);
+    if (result.account) setWalletAccount(result.account);
+    setWalletConnectionError('');
+    setProfile({ ...next, ...result.profile, avatar: result.switched ? figmaImage('v13_27') : next.avatar });
+    if (!result.switched) setListings(current => current.map(item => item.own ? { ...item, campus: next.campus, initials: next.name.charAt(0), location: next.pickup || 'On campus' } : item));
+    setModal(null); showToast(result.switched ? `Opened ${result.profile.name}'s wallet.` : 'Profile updated.');
   };
   const navigate = next => { setPage(next); setMobileNav(false); setSearch(''); setCategory('All finds'); };
   const toggleSave = id => setSaved(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
