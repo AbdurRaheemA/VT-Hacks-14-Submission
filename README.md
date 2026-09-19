@@ -31,5 +31,7 @@ Potential Features:
 - Picking location (Start with dmv schools in mock)
 - language switch for pages
 - Auto detect local currency by preference
+- Remove Student Seller Spotlight Section
+- Remove Virginia Tech Specific references: Virginia Tech Student Marketplace (opening box and bottom description, right at Virginia Tech (opening box), Just Hokies exchanging goods (opening box), Built for Virginia Tech (under A Student-First Community). 
 
 Branches correlate to different campuses
