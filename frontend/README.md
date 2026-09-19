@@ -57,6 +57,13 @@ updates with server-sent events, so two signed-in browsers can chat without
 refreshing. These conversations are intentionally cleared on backend restart;
 the bundled sample listings retain their browser-only demo messages.
 
+Profile settings also include a preferred chat language and display currency.
+Incoming server-backed messages are automatically translated by the backend;
+when the translated text differs, the message includes a Show original toggle.
+If translation is unavailable, the original message appears normally.
+Prices, wallet balances, and activity are displayed using an hourly cached
+Frankfurter rate while all Nessie accounting and listing inputs remain in USD.
+
 All images are bundled locally. Google Fonts requires internet, with system font fallbacks. No Figma plugin or account is required.
 
 Dorm.io is exclusively for Virginia Tech. Campus labels are fixed to Virginia Tech, including previously saved listings and profiles. The sustainability spotlight is a demo concept.

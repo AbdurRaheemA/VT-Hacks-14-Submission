@@ -8,6 +8,7 @@ The existing `backend/.env` should contain:
 
 ```dotenv
 NESSIE_TOKEN=your_nessie_api_key
+OPENAI_API_KEY=your_openai_api_key
 ```
 
 `DORMIO_DATA_FILE` is optional. By default, app-user mappings, listings, orders,
@@ -56,6 +57,7 @@ local store keeps their IDs against an opaque HttpOnly session.
 - `GET /api/chats` and `POST /api/chats/:id/messages` read and send messages.
 - `GET /api/chats/events` streams live conversation updates with server-sent
   events.
+- `GET /api/exchange-rate?currency=EUR` returns a cached USD display rate.
 
 Demo access is by name: `POST /api/session` with `{ "name": "John String" }`
 opens the matching Nessie customer and wallet. Keep the returned cookie for
@@ -78,6 +80,15 @@ year, merchant linkage, listings, orders, and idempotency records.
 Chats are intentionally held only in backend memory. Only the listing's buyer
 and seller can read or send messages, and every open browser receives live
 updates. Restarting the backend clears all conversations.
+
+Each profile stores a preferred chat language and display currency. Incoming
+messages are translated once for their recipient with `gpt-5.6-luna` through
+the OpenAI Responses API using structured output and `store: false`. The
+original is returned to that recipient only when a translation occurred. If
+OpenAI is unavailable or `OPENAI_API_KEY` is missing, chat delivery continues
+with the original text and no translation control.
+Nessie values remain in USD; display conversion uses the free, keyless
+Frankfurter v2 API and caches each rate for one hour.
 
 ## Raw Nessie wrapper
 

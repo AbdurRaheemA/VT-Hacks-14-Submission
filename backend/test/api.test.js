@@ -89,7 +89,7 @@ test('saving an existing name switches wallet without renaming or overwriting ei
   assert.equal(original.body.profile.name, 'Alex Rivera');
 });
 
-function fixture({ purchaseItem } = {}) {
+function fixture({ purchaseItem, translationService, currencyService } = {}) {
   const calls = { createUsers: [], accountIds: [], accountUpdates: [], updates: [], deposits: [], purchases: [] };
   const balances = new Map([
     ["account-1", 500],
@@ -156,7 +156,7 @@ function fixture({ purchaseItem } = {}) {
   const store = createAppStore();
   return {
     calls,
-    handler: createApiHandler({ nessie, marketplace, store }),
+    handler: createApiHandler({ nessie, marketplace, store, translationService, currencyService }),
   };
 }
 
@@ -374,8 +374,22 @@ test("persists a retryable order when the buyer charge succeeds before seller cr
   assert.equal(repeated.body.order.id, response.body.order.id);
 });
 
-test("keeps listing conversations in memory and limits them to both participants", async () => {
-  const { handler } = fixture();
+test("keeps listing conversations in memory, translates for the recipient, and limits access", async () => {
+  const translationCalls = [];
+  const { handler } = fixture({
+    translationService: {
+      translate: async (value, targetLanguage) => {
+        translationCalls.push([value, targetLanguage]);
+        if (value.startsWith("Fallback")) throw new Error("translation unavailable");
+        return value.startsWith("Hola")
+          ? { sourceLanguage: "es", translatedText: value, translated: false }
+          : { sourceLanguage: "en", translatedText: "¿Sigue disponible?", translated: true };
+      },
+    },
+    currencyService: {
+      rate: async (currency) => ({ base: "USD", quote: currency, rate: 0.84, date: "2026-09-18" }),
+    },
+  });
   const seller = await invoke(handler, {
     method: "POST",
     path: "/api/session",
@@ -391,6 +405,19 @@ test("keeps listing conversations in memory and limits them to both participants
     path: "/api/session",
     body: { profile: { name: "Other Student" } },
   });
+  const settings = await invoke(handler, {
+    method: "PUT",
+    path: "/api/profile",
+    cookie: cookieFrom(seller),
+    body: { profile: { name: "Seller Student", language: "es", currency: "EUR" } },
+  });
+  assert.equal(settings.body.profile.language, "es");
+  assert.equal(settings.body.profile.currency, "EUR");
+  const rate = await invoke(handler, {
+    path: "/api/exchange-rate?currency=EUR",
+    cookie: cookieFrom(seller),
+  });
+  assert.equal(rate.body.rate, 0.84);
   const created = await invoke(handler, {
     method: "POST",
     path: "/api/listings",
@@ -430,8 +457,9 @@ test("keeps listing conversations in memory and limits them to both participants
     body: { text: "Is this still available?" },
   });
   assert.equal(sent.status, 201);
+  assert.deepEqual(translationCalls[0], ["Is this still available?", "es"]);
   await new Promise(resolve => setImmediate(resolve));
-  assert.match(live.result.chunks.join(""), /Is this still available\?/);
+  assert.match(live.result.chunks.join(""), /¿Sigue disponible\?/);
   live.request.emit("close");
 
   const sellerChats = await invoke(handler, {
@@ -440,7 +468,44 @@ test("keeps listing conversations in memory and limits them to both participants
   });
   assert.equal(sellerChats.status, 200);
   assert.equal(sellerChats.body.conversations[0].otherUser.name, "Buyer Student");
-  assert.equal(sellerChats.body.conversations[0].messages[0].text, "Is this still available?");
+  assert.equal(sellerChats.body.conversations[0].messages[0].text, "¿Sigue disponible?");
+  assert.equal(sellerChats.body.conversations[0].messages[0].originalText, "Is this still available?");
+  assert.equal(sellerChats.body.conversations[0].messages[0].translated, true);
+
+  const buyerChats = await invoke(handler, {
+    path: "/api/chats",
+    cookie: cookieFrom(buyer),
+  });
+  assert.equal(buyerChats.body.conversations[0].messages[0].text, "Is this still available?");
+  assert.equal(buyerChats.body.conversations[0].messages[0].translated, false);
+
+  await invoke(handler, {
+    method: "POST",
+    path: `/api/chats/${started.body.conversation.id}/messages`,
+    cookie: cookieFrom(buyer),
+    body: { text: "Hola, ¿sigue disponible?" },
+  });
+  const sameLanguage = await invoke(handler, {
+    path: "/api/chats",
+    cookie: cookieFrom(seller),
+  });
+  assert.equal(sameLanguage.body.conversations[0].messages[1].translated, false);
+  assert.equal("originalText" in sameLanguage.body.conversations[0].messages[1], false);
+
+  const fallbackSent = await invoke(handler, {
+    method: "POST",
+    path: `/api/chats/${started.body.conversation.id}/messages`,
+    cookie: cookieFrom(buyer),
+    body: { text: "Fallback message" },
+  });
+  assert.equal(fallbackSent.status, 201);
+  const fallbackChats = await invoke(handler, {
+    path: "/api/chats",
+    cookie: cookieFrom(seller),
+  });
+  assert.equal(fallbackChats.body.conversations[0].messages[2].text, "Fallback message");
+  assert.equal(fallbackChats.body.conversations[0].messages[2].translated, false);
+  assert.equal("originalText" in fallbackChats.body.conversations[0].messages[2], false);
 
   const forbidden = await invoke(handler, {
     method: "POST",

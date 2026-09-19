@@ -1,5 +1,7 @@
 import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { normalizeName } from './app-store.js';
+import { supportedCurrencies } from "./currency.js";
+import { supportedLanguages } from "./translation.js";
 
 const testProviders = new Set(["stripe", "venmo", "paypal", "cashapp"]);
 const sessionCookieName = "dormio_session";
@@ -111,12 +113,16 @@ function text(value, fallback, maxLength) {
 }
 
 function validateProfile(value = {}) {
+  const language = Object.hasOwn(supportedLanguages, value.language) ? value.language : "en";
+  const currency = supportedCurrencies.includes(value.currency) ? value.currency : "USD";
   return {
     name: text(value.name, "Dorm.io Student", 40),
     campus: "Virginia Tech",
     year: text(value.year, "Other", 20),
     bio: typeof value.bio === "string" ? value.bio.trim().slice(0, 160) : "",
     pickup: typeof value.pickup === "string" ? value.pickup.trim().slice(0, 80) : "",
+    language,
+    currency,
   };
 }
 
@@ -201,7 +207,14 @@ function validateListing(body) {
   };
 }
 
-export function createApiHandler({ nessie, marketplace, store, secureCookies = false }) {
+export function createApiHandler({
+  nessie,
+  marketplace,
+  store,
+  secureCookies = false,
+  translationService = { translate: async (value) => ({ translatedText: value, translated: false }) },
+  currencyService = { rate: async () => ({ base: "USD", quote: "USD", rate: 1, date: null }) },
+}) {
   if (!store) throw new TypeError("store is required.");
   // serialize identity changes in this single-process demo.
   let identityQueue = Promise.resolve();
@@ -290,7 +303,7 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
     const account = await ensureAccount(customer, requestedProfile);
     const existing = await store.getUserByCustomerId(customer._id);
     if (existing) {
-      const profile = { ...existing.profile, name, campus: "Virginia Tech" };
+      const profile = validateProfile({ ...existing.profile, name, campus: "Virginia Tech" });
       return store.updateUser(existing.id, {
         customerId: customer._id,
         accountId: account._id,
@@ -325,6 +338,27 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
     return conversation.buyerUserId === userId || conversation.sellerUserId === userId;
   }
 
+  function publicMessage(message, viewerId) {
+    const translation = message.translation?.recipientUserId === viewerId && message.translation.translated
+      ? message.translation
+      : undefined;
+    return {
+      id: message.id,
+      senderUserId: message.senderUserId,
+      senderName: message.senderName,
+      text: translation?.translatedText || message.text,
+      createdAt: message.createdAt,
+      translated: Boolean(translation),
+      ...(translation
+        ? {
+            originalText: message.text,
+            sourceLanguage: translation.sourceLanguage,
+            targetLanguage: translation.targetLanguage,
+          }
+        : {}),
+    };
+  }
+
   async function publicConversation(conversation, viewerId) {
     const listing = await store.getListing(conversation.listingId);
     const otherUserId =
@@ -338,7 +372,7 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
         ? { id: listing.id, title: listing.title, price: listing.price }
         : { id: conversation.listingId, title: "Listing unavailable" },
       otherUser: { id: otherUserId, name: otherUser?.profile?.name || "Dorm.io user" },
-      messages: conversation.messages,
+      messages: conversation.messages.map((message) => publicMessage(message, viewerId)),
       createdAt: conversation.createdAt,
     };
   }
@@ -506,6 +540,20 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/api/exchange-rate") {
+        await requireUser(request);
+        const currency = url.searchParams.get("currency")?.toUpperCase();
+        if (!supportedCurrencies.includes(currency)) {
+          throw new ApiError(400, "currency is not supported.");
+        }
+        try {
+          sendJson(response, 200, await currencyService.rate(currency));
+        } catch {
+          throw new ApiError(502, "Currency conversion is temporarily unavailable.");
+        }
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/chats") {
         const user = await requireUser(request);
         sendJson(response, 200, { conversations: await conversationsFor(user.id) });
@@ -580,11 +628,31 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
         if (typeof body.text !== "string" || !body.text.trim()) {
           throw new ApiError(400, "message text is required.");
         }
+        const originalText = body.text.trim().slice(0, 2_000);
+        const recipientUserId = conversation.buyerUserId === user.id
+          ? conversation.sellerUserId
+          : conversation.buyerUserId;
+        const recipient = await store.getUser(recipientUserId);
+        let translation;
+        try {
+          const result = await translationService.translate(
+            originalText,
+            recipient?.profile?.language || "en",
+          );
+          translation = {
+            recipientUserId,
+            targetLanguage: recipient?.profile?.language || "en",
+            ...result,
+          };
+        } catch {
+          translation = undefined;
+        }
         const message = {
           id: randomUUID(),
           senderUserId: user.id,
           senderName: user.profile.name,
-          text: body.text.trim().slice(0, 2_000),
+          text: originalText,
+          translation,
           createdAt: new Date().toISOString(),
         };
         conversation.messages.push(message);
@@ -716,7 +784,7 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
     } catch (error) {
       const status = error instanceof ApiError ? error.status : 502;
       sendJson(response, status, {
-        error: status < 500 ? error.message : "Nessie could not complete the request.",
+        error: error instanceof ApiError ? error.message : "Nessie could not complete the request.",
         ...(error.code ? { code: error.code } : {}),
         ...(error.candidates ? { candidates: error.candidates } : {}),
       });

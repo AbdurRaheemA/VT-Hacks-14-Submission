@@ -9,6 +9,18 @@
   justify-content: flex-start;
 }
 
+.translation-toggle {
+  display: block;
+  padding: 4px 0 0;
+  color: #6b52d6;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.message-bubble:not(.incoming) .translation-toggle {
+  margin-left: auto;
+}
+
 [data-theme=dark] .message-bubble.incoming {
   background: #262330;
 }

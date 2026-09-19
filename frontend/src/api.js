@@ -55,6 +55,10 @@ export function getListings() {
   return request('/api/listings');
 }
 
+export function getExchangeRate(currency) {
+  return request(`/api/exchange-rate?currency=${encodeURIComponent(currency)}`);
+}
+
 export function createListing(listing) {
   return request('/api/listings', {
     method: 'POST',

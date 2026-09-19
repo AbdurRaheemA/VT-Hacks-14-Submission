@@ -28,6 +28,8 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
       return Response.json({ user: { id: 'user-1', customerId: 'customer-1', accountId: 'account-1' }, profile });
     }
     if (url === '/api/wallet/deposits') return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
+    if (url === '/api/exchange-rate?currency=USD') return Response.json({ base: 'USD', quote: 'USD', rate: 1, date: null });
+    if (url === '/api/exchange-rate?currency=EUR') return Response.json({ base: 'USD', quote: 'EUR', rate: 0.84, date: '2026-09-18' });
     if (url === '/api/listings' && options.method === 'POST') {
       const listing = JSON.parse(options.body);
       return Response.json({ listing: { id: '11111111-1111-4111-8111-111111111111', ...listing, sellerUserId: 'user-1', seller: 'Alex Rivera', campus: 'Virginia Tech', sold: false } }, { status: 201 });
@@ -63,6 +65,14 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
         const prototype = element.tagName === 'TEXTAREA' ? dom.window.HTMLTextAreaElement.prototype : dom.window.HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value);
         element.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      });
+    };
+    const select = async (selector, value) => {
+      const element = document.querySelector(selector);
+      assert.ok(element);
+      await act(async () => {
+        element.value = value;
+        element.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
       });
     };
     assert.equal(document.querySelectorAll('.product-card').length, 13);
@@ -234,6 +244,14 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(JSON.parse(localStorage.getItem('dormio-v1-transactions')).length, 0);
     assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).bio, 'Existing John profile');
     assert.equal(JSON.parse(localStorage.getItem('dormio-demo-state-user-1')).transactions.length > 0, true, 'previous user activity is retained separately');
+    await click('[aria-label="Open profile settings"]');
+    await select('[name="language"]', 'es');
+    await select('[name="currency"]', 'EUR');
+    await button('Save changes');
+    await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
+    assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).language, 'es');
+    assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).currency, 'EUR');
+    assert.match(document.querySelector('.wallet-card').textContent, /€567/);
   } finally {
     if (root) await act(async () => root.unmount());
     await server.close();
