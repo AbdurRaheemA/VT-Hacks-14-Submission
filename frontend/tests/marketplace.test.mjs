@@ -45,7 +45,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(document.querySelectorAll('.product-card').length, 13);
     assert.equal(document.querySelectorAll('.dorm-arrivals-track .product-card').length, 5);
     assert.equal(document.querySelectorAll('.dorm-product-grid .product-card').length, 8);
-    assert.ok([...document.querySelectorAll('img')].every(img => img.getAttribute('src')?.includes('Figma')));
+    assert.ok([...document.querySelectorAll('img')].every(img => img.getAttribute('src')?.includes('/assets/images/')));
     await click('[aria-label="Switch to dark mode"]');
     assert.equal(document.documentElement.dataset.theme, 'dark');
     assert.equal(JSON.parse(localStorage.getItem('dormio-theme')), 'dark');
@@ -105,7 +105,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(document.querySelectorAll('.product-card').length, 12);
     assert.equal(document.querySelector('[aria-label="View Mini Fridge (Super Clean, Works Perfect)"]'), null);
     localStorage.setItem('dormio-profile', JSON.stringify({ ...JSON.parse(localStorage.getItem('dormio-profile')), campus: 'Old campus' }));
-    localStorage.setItem('dormio-v1-listings', JSON.stringify(JSON.parse(localStorage.getItem('dormio-v1-listings')).map(item => ({ ...item, campus: 'Old campus' }))));
+    localStorage.setItem('dormio-v1-listings', JSON.stringify(JSON.parse(localStorage.getItem('dormio-v1-listings')).map(item => ({ ...item, campus: 'Old campus', image: undefined }))));
     await act(async () => root.unmount());
     root = createRoot(document.getElementById('root'));
     await act(async () => root.render(createElement(App)));
@@ -113,6 +113,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.ok([...document.querySelectorAll('.dorm-seller small')].every(label => label.textContent === 'Virginia Tech'));
     assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).campus, 'Virginia Tech');
     assert.ok(JSON.parse(localStorage.getItem('dormio-v1-listings')).every(item => item.campus === 'Virginia Tech'));
+    assert.ok([...document.querySelectorAll('.product-card img')].every(img => img.getAttribute('src')?.includes('/assets/images/')), 'missing persisted images are repaired');
     assert.equal(document.documentElement.dataset.theme, 'dark', 'theme persists after remount');
     assert.match(document.querySelector('.dorm-user').textContent, /Alex Rivera/, 'profile persists after remount');
     await click('[aria-label="Switch to light mode"]');

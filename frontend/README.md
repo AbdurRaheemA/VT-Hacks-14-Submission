@@ -22,7 +22,8 @@ npm run preview
 ## Conversion map
 
 - `src/components/Marketplace.jsx`: header, search, categories, hero, trust strip, product cards, trending grid, new-arrivals carousel, spotlights, app banner, footer.
-- `src/figmaAssets.js`: Vite imports for all supplied PNGs, fingerprinted in production.
+- `src/assets/images/`: local listing, hero, profile, and promotional photos used throughout the app.
+- `src/figmaAssets.js`: maps legacy design keys to local JPG assets that Vite fingerprints in production.
 - `src/data.js`: 13 sample listings with the exported prices, seller names, campus labels, and images.
 - `src/dorm.css`: responsive purple theme with Figtree and Outfit typography.
 - `src/App.jsx`: navigation, filtering, favorites, photo uploads, messaging, wallet, checkout, and dialogs.

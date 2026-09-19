@@ -17,10 +17,16 @@ function useStored(key, fallback, normalize = value => value) {
 }
 const categories = [['All finds', Grid2X2], ['Textbooks', BookOpen], ['Furniture', Sofa], ['Electronics', Headphones], ['Dorm essentials', Lamp], ['Clothing & more', Shirt], ['Free Stuff', Gift]];
 const money = value => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value);
+const defaultListingsById = new Map(initialListings.map(item => [item.id, item]));
+const repairListings = items => items.map(item => ({
+  ...item,
+  campus: 'Virginia Tech',
+  image: item.own ? item.image : defaultListingsById.get(item.id)?.image || item.image,
+}));
 
 export default function App() {
   const [theme, setTheme] = useStored('dormio-theme', window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-  const [profile, setProfile] = useStored('dormio-profile', { name: 'Alex W.', campus: 'Virginia Tech', year: 'Sophomore', bio: '', pickup: '', avatar: figmaImage('v13_27') }, value => ({ ...value, campus: 'Virginia Tech' }));
+  const [profile, setProfile] = useStored('dormio-profile', { name: 'Alex W.', campus: 'Virginia Tech', year: 'Sophomore', bio: '', pickup: '', avatar: figmaImage('v13_27') }, value => ({ ...value, campus: 'Virginia Tech', avatar: value.avatar || figmaImage('v13_27') }));
   const toggleTheme = () => setTheme(current => current === 'dark' ? 'light' : 'dark');
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   const [page, setPage] = useState('Explore');
@@ -28,7 +34,7 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState('recommended');
   const [saved, setSaved] = useStored('dormio-v1-saved', []);
-  const [listings, setListings] = useStored('dormio-v1-listings', initialListings, items => items.map(item => ({ ...item, campus: 'Virginia Tech' })));
+  const [listings, setListings] = useStored('dormio-v1-listings', initialListings, repairListings);
   const [preferences, setPreferences] = useStored('dormio-payments', { preferred: 'wallet', handles: {} });
   const [checkoutMethod, setCheckoutMethod] = useState('wallet');
   const [setupMethod, setSetupMethod] = useState('stripe');
