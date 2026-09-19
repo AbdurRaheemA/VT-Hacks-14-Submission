@@ -52,6 +52,25 @@ function createResources(request) {
       get: (id, options) => request("GET", `/deposits/${segment(id)}`, { options }),
       listByAccount: (accountId, options) =>
         request("GET", `/accounts/${segment(accountId, "accountId")}/deposits`, { options }),
+      listByCustomer: async (customerId, options) => {
+        const accounts = await request(
+          "GET",
+          `/customers/${segment(customerId, "customerId")}/accounts`,
+          { options },
+        );
+        const groups = await Promise.all(
+          accounts.map(async (account) => {
+            const deposits = await request("GET", `/accounts/${segment(account._id)}/deposits`, {
+              options,
+            });
+            return deposits.map((deposit) => ({
+              ...deposit,
+              account_id: deposit.account_id || account._id,
+            }));
+          }),
+        );
+        return groups.flat();
+      },
       create: (accountId, body, options) =>
         request("POST", `/accounts/${segment(accountId, "accountId")}/deposits`, {
           body,

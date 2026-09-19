@@ -8,7 +8,7 @@ import './payments.css';
 import CampusWallet, { AddCredits, PaymentSetup, PaymentCheckout } from './components/CampusWallet';
 import ProfilePanel from './components/ProfilePanel';
 import { figmaImage } from './figmaAssets';
-import { depositTestCredits, getWallet } from './api';
+import { bootstrapSession, createListing, deleteListing, depositTestCredits, getListings, purchaseListing, updateProfile } from './api';
 
 function useStored(key, fallback, normalize = value => value) {
   const [value, setValue] = useState(() => { try { return normalize(JSON.parse(localStorage.getItem(key)) ?? fallback); } catch { return fallback; } });
@@ -39,6 +39,7 @@ export default function App() {
   const [checkoutMethod, setCheckoutMethod] = useState('wallet');
   const [setupMethod, setSetupMethod] = useState('stripe');
   const [transactions, setTransactions] = useStored('dormio-v1-transactions', []);
+  const [currentUser, setCurrentUser] = useState(null);
   const [walletAccount, setWalletAccount] = useState(null);
   const [walletConnectionError, setWalletConnectionError] = useState('');
   const [messages, setMessages] = useStored('dormio-v1-messages', []);
@@ -54,15 +55,31 @@ export default function App() {
   const [paymentDone, setPaymentDone] = useState(false);
   const [formError, setFormError] = useState('');
   const [imagePreview, setImagePreview] = useState('');
-  const balance = (walletAccount?.balance ?? 500) - transactions.reduce((sum, tx) => sum + (tx.kind !== 'deposit' && (!tx.method || tx.method === 'wallet') && tx.status !== 'cancelled' ? tx.amount : 0), 0);
+  const balance = (walletAccount?.balance ?? 500) - transactions.reduce((sum, tx) => sum + (tx.kind !== 'deposit' && !tx.serverSettled && (!tx.method || tx.method === 'wallet') && tx.status !== 'cancelled' ? tx.amount : 0), 0);
   const toastTimer = useRef();
   const showToast = text => { setToast(text); clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(''), 3500); };
   useEffect(() => {
     let active = true;
-    getWallet().then(({ account }) => {
+    bootstrapSession(profile).then(async ({ user, profile: serverProfile, account }) => {
       if (!active) return;
+      setCurrentUser(user);
+      setProfile(current => ({ ...current, ...serverProfile, avatar: current.avatar }));
       setWalletAccount(account);
       setWalletConnectionError('');
+      const { listings: remoteListings } = await getListings();
+      if (!active) return;
+      setListings(current => [
+        ...remoteListings.map(item => ({
+          ...item,
+          own: item.sellerUserId === user.id,
+          serverBacked: true,
+          initials: item.seller.charAt(0),
+          color: '#eaded3',
+          age: 0,
+          collection: 'new',
+        })),
+        ...current.filter(item => !item.serverBacked),
+      ]);
     }).catch(() => {
       if (active) setWalletConnectionError('Nessie wallet is offline. Showing local demo funds.');
     });
@@ -77,11 +94,24 @@ export default function App() {
     showToast(`${money(amount)} in test credits added with ${provider}.`);
     return result;
   };
-  const saveProfile = next => {
+  useEffect(() => {
+    if (!currentUser) return;
+    setListings(current => current.map(item =>
+      item.own && !item.serverBacked && !item.sellerUserId
+        ? { ...item, sellerUserId: currentUser.id }
+        : item
+    ));
+  }, [currentUser, setListings]);
+  const saveProfile = async next => {
     next = { ...next, campus: 'Virginia Tech' };
-    try { localStorage.setItem('dormio-profile', JSON.stringify(next)); }
-    catch { throw new Error('Not enough browser storage. Try a smaller profile photo.'); }
-    setProfile(next);
+    if (!currentUser) {
+      const session = await bootstrapSession(profile);
+      setCurrentUser(session.user);
+      setWalletAccount(session.account);
+    }
+    const result = await updateProfile(next);
+    setCurrentUser(result.user);
+    setProfile({ ...next, ...result.profile, avatar: next.avatar });
     setListings(current => current.map(item => item.own ? { ...item, campus: next.campus, initials: next.name.charAt(0), location: next.pickup || 'On campus' } : item));
     setModal(null); showToast('Profile updated.');
   };
@@ -105,20 +135,45 @@ export default function App() {
   }, [modal]);
   const startChat = item => { setActiveChat(item); setModal(null); navigate('Messages'); };
   const submitMessage = e => { e.preventDefault(); if (!messageText.trim() || !activeChat) return; setMessages(current => [...current, { id: Date.now(), listingId: activeChat.id, text: messageText.trim(), time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]); setMessageText(''); };
-  const buyItem = () => {
+  const buyItem = async () => {
     if (checkoutMethod === 'stripe') { setFormError('Stripe checkout requires a backend integration.'); return; }
     if (checkoutMethod === 'wallet' && selected.price > balance) { setFormError('Your demo wallet does not have enough funds for this purchase.'); return; }
     if (transactions.some(tx => tx.listingId === selected.id && tx.status !== 'cancelled')) return;
-    setTransactions(current => [{ id: `LP-${Date.now().toString().slice(-7)}`, listingId: selected.id, title: selected.title, seller: selected.seller, amount: selected.price, method: checkoutMethod, status: checkoutMethod === 'wallet' ? 'completed' : 'pending', date: new Date().toISOString() }, ...current]);
+    const transactionId = `LP-${Date.now().toString().slice(-7)}`;
+    if (selected.serverBacked && checkoutMethod === 'wallet') {
+      try {
+        const result = await purchaseListing(selected.id, `purchase_${crypto.randomUUID().replaceAll('-', '')}`);
+        setWalletAccount(result.account);
+      } catch (error) {
+        setFormError(error.message);
+        return;
+      }
+    }
+    setTransactions(current => [{ id: transactionId, listingId: selected.id, title: selected.title, seller: selected.seller, amount: selected.price, method: checkoutMethod, serverSettled: Boolean(selected.serverBacked && checkoutMethod === 'wallet'), status: checkoutMethod === 'wallet' ? 'completed' : 'pending', date: new Date().toISOString() }, ...current]);
     setListings(current => current.map(item => item.id === selected.id ? { ...item, sold: true } : item)); setPaymentDone(true);
   };
-  const submitListing = e => {
+  const submitListing = async e => {
     e.preventDefault(); const data = new FormData(e.currentTarget); const price = Number(data.get('price'));
     if (data.get('category') === 'Free Stuff' && price !== 0) { setFormError('Free Stuff listings must have a price of $0.'); return; }
     if (!imagePreview) { setFormError('Add a photo so other students can see your item.'); return; }
     if (!Number.isFinite(price) || price < 0 || price > 10000) { setFormError('Please enter a price between $0 and $10,000.'); return; }
-    setListings(current => [{ id: Date.now(), title: data.get('title').trim(), price, category: price === 0 ? 'Free Stuff' : data.get('category'), condition: data.get('condition'), description: data.get('description').trim(), image: imagePreview, location: profile.pickup || 'On campus', campus: profile.campus, seller: 'You', initials: profile.name.charAt(0), color: '#eaded3', age: 0, own: true }, ...current]);
+    if (!currentUser) { setFormError('Your Dorm.io account is still connecting. Try again in a moment.'); return; }
+    try {
+      const { listing } = await createListing({ title: data.get('title').trim(), price, category: price === 0 ? 'Free Stuff' : data.get('category'), condition: data.get('condition'), description: data.get('description').trim(), image: imagePreview, location: profile.pickup || 'On campus' });
+      setListings(current => [{ ...listing, seller: 'You', initials: profile.name.charAt(0), color: '#eaded3', age: 0, collection: 'new', own: true, serverBacked: true }, ...current]);
+    } catch (error) {
+      setFormError(error.message);
+      return;
+    }
     closeModal(); navigate('My listings'); showToast('Your listing is live. Welcome to the loop!');
+  };
+  const removeListing = async item => {
+    if (item.serverBacked) {
+      try { await deleteListing(item.id); }
+      catch (error) { setFormError(error.message); return; }
+    }
+    setListings(current => current.filter(listing => listing.id !== item.id));
+    closeModal(); showToast('Listing removed.');
   };
   const uploadImage = e => { const file = e.target.files[0]; if (!file) return; if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { setFormError('Choose a JPG, PNG, or WebP image.'); return; } if (file.size > 2000000) { setFormError('Choose an image smaller than 2 MB.'); return; } const reader = new FileReader(); reader.onload = () => { setImagePreview(reader.result); setFormError(''); }; reader.readAsDataURL(file); };
   const filtered = listings.filter(item => !item.sold && (page !== 'Saved items' || saved.includes(item.id)) && (page !== 'My listings' || item.own) && (category === 'All finds' || (category === 'Free Stuff' ? item.price === 0 : item.category === category)) && `${item.title} ${item.category}`.toLowerCase().includes(search.toLowerCase()) && item.price <= maxPrice && (condition === 'Any condition' || item.condition === condition)).sort((a, b) => sort === 'low' ? a.price - b.price : sort === 'high' ? b.price - a.price : sort === 'new' ? a.age - b.age : sort === 'popular' ? (b.likes || 0) - (a.likes || 0) : 0);
@@ -143,11 +198,11 @@ export default function App() {
     <SiteFooter {...{ navigate, onCategory, setModal }} />
     {toast && <div className="toast" role="status"><Check size={18} />{toast}</div>}
     {modal && <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) closeModal(); }}><section role="dialog" aria-modal="true" aria-labelledby="modal-title" className={`modal ${modal === 'detail' ? 'detail-modal' : ''}`}><button className="modal-close icon-button" onClick={closeModal} aria-label="Close dialog"><X size={21} /></button>
-      {modal === 'detail' && selected && <><div className="detail-image"><img src={selected.image} alt={selected.title} /></div><div className="detail-content"><div className="eyebrow">{selected.category} · {selected.condition}</div><h2 id="modal-title">{selected.title}</h2><div className="detail-price">{money(selected.price)} {selected.original && <del>{money(selected.original)}</del>}</div><p>{selected.description}</p><div className="detail-seller"><span className="avatar" style={{ background: selected.color }}>{selected.initials}</span><div><strong>{selected.seller} <BadgeCheck size={14} /></strong><small>Virginia Tech · {selected.location}</small></div></div><div className="pickup-note"><MapPin size={18} /><span>Meet nearby, keep it simple.<small>Arrange a public campus pickup with the seller.</small></span></div>{selected.sold || transactions.some(tx => tx.listingId === selected.id && tx.status !== 'cancelled') ? <div className="status-pill">This find has a new home.</div> : selected.own ? <button className="secondary full-width" onClick={() => { setListings(current => current.filter(item => item.id !== selected.id)); closeModal(); showToast('Listing removed.'); }}>Remove your listing</button> : <><button className="primary full-width" onClick={() => { setCheckoutMethod(preferences.preferred); setModal('checkout'); setPaymentDone(false); }}>Make it yours <ArrowRight size={17} /></button><button className="secondary full-width" onClick={() => startChat(selected)}><MessageCircle size={17} /> Message seller</button></>}<div className="checkout-note"><ShieldCheck size={13} /> Nessie-powered demo checkout</div></div></>}
+      {modal === 'detail' && selected && <><div className="detail-image"><img src={selected.image} alt={selected.title} /></div><div className="detail-content"><div className="eyebrow">{selected.category} · {selected.condition}</div><h2 id="modal-title">{selected.title}</h2><div className="detail-price">{money(selected.price)} {selected.original && <del>{money(selected.original)}</del>}</div><p>{selected.description}</p><div className="detail-seller"><span className="avatar" style={{ background: selected.color }}>{selected.initials}</span><div><strong>{selected.seller} <BadgeCheck size={14} /></strong><small>Virginia Tech · {selected.location}</small></div></div><div className="pickup-note"><MapPin size={18} /><span>Meet nearby, keep it simple.<small>Arrange a public campus pickup with the seller.</small></span></div>{selected.sold || transactions.some(tx => tx.listingId === selected.id && tx.status !== 'cancelled') ? <div className="status-pill">This find has a new home.</div> : selected.own ? <button className="secondary full-width" onClick={() => removeListing(selected)}>Remove your listing</button> : <><button className="primary full-width" onClick={() => { setCheckoutMethod(preferences.preferred); setModal('checkout'); setPaymentDone(false); }}>Make it yours <ArrowRight size={17} /></button><button className="secondary full-width" onClick={() => startChat(selected)}><MessageCircle size={17} /> Message seller</button></>}<div className="checkout-note"><ShieldCheck size={13} /> Nessie-powered demo checkout</div></div></>}
       {modal === 'checkout' && <PaymentCheckout {...{ selected, balance, buyItem, paymentDone, startChat, closeModal, navigate }} method={checkoutMethod} setMethod={setCheckoutMethod} error={formError} />}
       {modal === 'addCredits' && <AddCredits onDeposit={addTestCredits} />}
       {modal === 'paymentSetup' && <PaymentSetup methodId={setupMethod} {...{ preferences, closeModal }} save={(method, handle) => { setPreferences(current => ({ ...current, handles: { ...current.handles, [method]: handle } })); closeModal(); showToast('Payment details saved.'); }} />}
-      {modal === 'sell' && <form className="modal-body sell-form" onSubmit={submitListing}><div className="eyebrow">PASS IT ON. MAKE SOMEONE’S DAY.</div><h2 id="modal-title">Give it a second chapter.</h2><p>A few details, one photo, and you’re in the loop.</p><label className={`upload-area ${imagePreview ? 'has-image' : ''}`}>{imagePreview ? <img src={imagePreview} alt="Listing preview" /> : <><Plus size={28} /><strong>Add your best photo</strong><span>JPG, PNG, or WebP · Up to 2 MB</span></>}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImage} aria-label="Upload listing photo" /></label><label>What are you selling?<input name="title" required maxLength={70} placeholder="e.g. Your next favorite desk chair" /></label><div className="form-grid"><label>Category<select name="category">{categories.slice(1).map(([name]) => <option key={name}>{name}</option>)}</select></label><label>Condition<select name="condition"><option>Like new</option><option>Good</option><option>Fair</option></select></label></div><label>Price ($)<input name="price" type="number" min="0" max="10000" step="0.01" placeholder="25.00" required /></label><label>A little about your item<textarea name="description" required maxLength={1200} rows={3} placeholder="The details you’d want to know. Condition, size, pickup spot..." /></label>{formError && <p className="form-error" role="alert">{formError}</p>}<button className="primary full-width" type="submit">Publish listing <ArrowRight size={17} /></button><span className="checkout-note">Your listing is saved locally in this demo.</span></form>}
+      {modal === 'sell' && <form className="modal-body sell-form" onSubmit={submitListing}><div className="eyebrow">PASS IT ON. MAKE SOMEONE’S DAY.</div><h2 id="modal-title">Give it a second chapter.</h2><p>A few details, one photo, and you’re in the loop.</p><label className={`upload-area ${imagePreview ? 'has-image' : ''}`}>{imagePreview ? <img src={imagePreview} alt="Listing preview" /> : <><Plus size={28} /><strong>Add your best photo</strong><span>JPG, PNG, or WebP · Up to 2 MB</span></>}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImage} aria-label="Upload listing photo" /></label><label>What are you selling?<input name="title" required maxLength={70} placeholder="e.g. Your next favorite desk chair" /></label><div className="form-grid"><label>Category<select name="category">{categories.slice(1).map(([name]) => <option key={name}>{name}</option>)}</select></label><label>Condition<select name="condition"><option>Like new</option><option>Good</option><option>Fair</option></select></label></div><label>Price ($)<input name="price" type="number" min="0" max="10000" step="0.01" placeholder="25.00" required /></label><label>A little about your item<textarea name="description" required maxLength={1200} rows={3} placeholder="The details you’d want to know. Condition, size, pickup spot..." /></label>{formError && <p className="form-error" role="alert">{formError}</p>}<button className="primary full-width" type="submit">Publish listing <ArrowRight size={17} /></button><span className="checkout-note">Your listing is linked to your Dorm.io seller account.</span></form>}
       {modal === 'help' && <div className="modal-body"><div className="eyebrow">GOOD NEIGHBORS. GOOD FINDS.</div><h2 id="modal-title">Welcome to the community.</h2><div className="help-item"><Search /><div><h3>Find your next favorite</h3><p>Browse by category, set a budget, or search for something specific. Save your favorites with the heart.</p></div></div><div className="help-item"><MessageCircle /><div><h3>Say hello, meet on campus</h3><p>Ask sellers about the item and agree on a public pickup spot, like the library or student center.</p></div></div><div className="help-item"><Wallet /><div><h3>Try your campus wallet</h3><p>Everyone starts with $500 in demo funds. Purchases update your balance and history on this device.</p></div></div><div className="help-item"><Leaf /><div><h3>Keep the good things going</h3><p>List items with honest descriptions and clear photos. A little care makes a better campus community.</p></div></div></div>}
       {modal === 'notifications' && <div className="modal-body"><div className="eyebrow">IN THE LOOP</div><h2 id="modal-title">Your campus updates.</h2><div className="help-item"><Sparkles /><div><h3>Welcome to Dorm.io!</h3><p>Your campus marketplace is ready to explore. Find your next favorite or give something a second home.</p></div></div><div className="help-item"><Wallet /><div><h3>Your demo wallet is ready</h3><p>You have {money(balance)} to explore the simulated checkout experience.</p><button className="text-button" onClick={() => { closeModal(); navigate('My wallet'); }}>Open your wallet <ArrowRight size={15} /></button></div></div></div>}
       {['shop', 'ecohub', 'app', 'about', 'privacy', 'terms'].includes(modal) && <div className="modal-body"><div className="eyebrow">DORM.IO COMMUNITY</div><h2 id="modal-title">{{ shop: 'Sofia’s Thrift Haven', ecohub: 'Hokie Sustainability Hub', app: 'Your campus, coming to your pocket.', about: 'Built around campus life.', privacy: 'Your demo data stays here.', terms: 'A little care goes a long way.' }[modal]}</h2><p>{{ shop: 'Sofia is a featured seller concept from the design. Her shop has no active listings yet. Explore the campus clothing collection in the meantime.', ecohub: 'This featured campus initiative celebrates reuse and semester-end donations. You can join the spirit of the project by listing an item for free.', app: 'The mobile apps shown in the design are coming soon. There is no App Store or Google Play release yet. You can use this responsive website on your phone today.', about: 'Dorm.io is a student marketplace prototype for finding good deals, sharing useful things, and making campus life a little more circular. Careers, brand assets, and support channels are not live yet.', privacy: 'This prototype stores listings, photos, favorites, messages, and demo purchases in your browser. No real student verification or payments take place. Clearing this site’s browser storage removes your demo data. Fonts load from Google Fonts; listing images are bundled locally.', terms: 'Use honest descriptions and clear photos. Arrange pickups in public campus spaces. This is a demo with simulated funds and sample seller profiles; the featured shops and organizations are design concepts.' }[modal]}</p>{modal === 'shop' && <button className="primary full-width" onClick={() => { closeModal(); onCategory('Clothing & more'); }}>Explore Clothing & Fits <ArrowRight size={17} /></button>}{modal === 'ecohub' && <button className="primary full-width" onClick={openSell}>Post an item for free <Gift size={17} /></button>}</div>}

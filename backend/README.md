@@ -8,8 +8,11 @@ The existing `backend/.env` should contain:
 
 ```dotenv
 NESSIE_TOKEN=your_nessie_api_key
-NESSIE_ACCOUNT_ID=your_demo_checking_account_id
 ```
+
+`DORMIO_DATA_FILE` is optional. By default, app-user mappings, listings, orders,
+and idempotency records are stored in `backend/data/app.json`, which is ignored
+by Git.
 
 Use Node.js 20.12 or newer. No package installation is required.
 
@@ -35,7 +38,24 @@ cd frontend
 npm run dev
 ```
 
-The frontend proxies `/api` requests to `http://localhost:3001`. `NESSIE_ACCOUNT_ID` selects the server-side demo wallet; it is never accepted from the browser.
+The frontend proxies `/api` requests to `http://localhost:3001`. On first use,
+the backend creates one Nessie customer, checking account, and seller merchant,
+then stores their IDs against an opaque HttpOnly session. Account and customer
+IDs are resolved by the backend and are never accepted from the browser.
+
+## App-user identity
+
+- `POST /api/session` creates or resumes the current app user.
+- `PUT /api/profile` updates the app profile and its Nessie customer name.
+- `GET /api/wallet` and `POST /api/wallet/deposits` operate on that user's
+  mapped checking account.
+- `GET|POST /api/listings` persist user-owned listings.
+- `POST /api/listings/:id/purchase` resolves both users server-side and records
+  a buyer purchase plus seller deposit through Nessie.
+
+This is hackathon-grade anonymous session authentication, not production student
+login. Production should replace it with the university identity provider while
+retaining the server-side user/customer/account mapping.
 
 ## Raw Nessie wrapper
 
@@ -46,6 +66,7 @@ const nessie = createNessieClientFromEnv();
 
 const customers = await nessie.customers.list();
 const deposits = await nessie.deposits.listByAccount(accountId);
+const customerDeposits = await nessie.deposits.listByCustomer(customerId);
 const purchases = await nessie.purchases.listByAccount(accountId);
 ```
 
@@ -53,7 +74,7 @@ The client exposes:
 
 - `customers`: `list`, `get`, `getByAccount`, `create`, `update`
 - `accounts`: `list`, `get`, `listByCustomer`, `create`, `update`, `delete`
-- `deposits`: `list`, `get`, `listByAccount`, `create`, `update`, `delete`
+- `deposits`: `list`, `get`, `listByAccount`, `listByCustomer`, `create`, `update`, `delete`
 - `withdrawals`: `get`, `listByAccount`, `create`, `update`, `delete`
 - `purchases`: `get`, `listByAccount`, `listByMerchant`, `listByMerchantAndAccount`, `create`, `update`, `delete`
 - `bills`: `get`, `listByAccount`, `listByCustomer`, `create`, `update`, `delete`
@@ -69,6 +90,11 @@ import { createMarketplaceService, createNessieClientFromEnv } from "./src/index
 const marketplace = createMarketplaceService(createNessieClientFromEnv());
 
 await marketplace.addCredits(accountId, 50);
+
+// When the identifier you have is a Nessie customer ID:
+await marketplace.addCreditsForCustomer(customerId, 50);
+const wallet = await marketplace.getCustomerWallet(customerId);
+console.log(wallet.account.base_balance, wallet.account.balance);
 
 await marketplace.purchaseItem({
   buyerAccountId,
@@ -92,4 +118,9 @@ Suggested mapping:
 
 Keep listing ownership, order state, seller-to-merchant mappings, and idempotency keys in the app database. Nessie does not provide atomic settlement across a buyer purchase and seller deposit. If the seller deposit fails after the purchase succeeds, `purchaseItem` throws `MarketplaceSettlementError` with the successful purchase response in `error.details`; persist that state and retry or reconcile the seller credit from the backend.
 
-The current Nessie sandbox records deposits without updating the account object's `balance`. The wallet API therefore derives its displayed balance from the account's base balance plus completed deposits, less completed withdrawals and purchases.
+Nessie customer IDs and account IDs are different. Use `accounts.listByCustomer`,
+`deposits.listByCustomer`, or the customer-aware marketplace helpers when starting
+from a customer ID. The current Nessie sandbox records deposits without updating
+the account object's stored `balance`; `walletSnapshot` and `getCustomerWallet`
+therefore expose both `base_balance` and a derived `balance` calculated from
+completed deposits, withdrawals, and purchases.

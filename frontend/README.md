@@ -35,7 +35,18 @@ Use the moon/sun button in the header to switch themes. Profile settings keep yo
 
 ## Current integration scope
 
-This checkout contains the local demo frontend and Nessie helper library, not an HTTP marketplace backend. Purchases, uploaded photos, listings, messages, and favorites persist in browser storage under `dormio-v1-*`. Old `loop-*` data is left untouched. Payments and profile verification are simulated. Mobile apps, spotlight sellers, and partnerships are design concepts.
+The frontend now creates or resumes a backend app-user session. Each app user is
+mapped to one Nessie customer, checking account, and seller merchant. Profile
+metadata, owned listings, orders, and payment idempotency records are persisted
+by the backend. Wallet purchases of server-backed user listings settle from the
+buyer's mapped account into the seller's mapped account.
+
+Sample design listings, messages, favorites, payment preferences, transaction
+presentation, and uploaded profile photos still use browser storage under
+`dormio-v1-*`. Sample-listing checkout remains a local demo because those
+fictional sellers do not have Nessie customers. Payments and student
+verification are simulated. Mobile apps, spotlight sellers, and partnerships
+are design concepts.
 
 All images are bundled locally. Google Fonts requires internet, with system font fallbacks. No Figma plugin or account is required.
 
@@ -45,6 +56,11 @@ Dorm.io is exclusively for Virginia Tech. Campus labels are fixed to Virginia Te
 
 The wallet and checkout show Stripe, Venmo, PayPal, Cash App, cash at pickup, and the existing demo wallet. A preferred method and optional personal payment identifiers are stored locally. Saving an identifier does not link or verify a provider account.
 
-Venmo, PayPal, Cash App, and cash create pending reservations. No demo balance is deducted, no external payment is initiated, and buyers can message the seller or cancel the reservation from wallet activity. Only demo-wallet purchases deduct the simulated balance. Stripe is visible with a setup dialog but checkout is disabled until a real integration exists.
+Venmo, PayPal, Cash App, and cash create local pending reservations. No demo
+balance is deducted, no external payment is initiated, and buyers can message
+the seller or cancel the reservation from wallet activity. Demo-wallet
+purchases of server-backed listings settle through Nessie; sample design
+listings retain the local demo flow. Stripe is visible with a setup dialog but
+checkout is disabled until a real integration exists.
 
 For real marketplace payments, use server-side [Stripe Connect](https://docs.stripe.com/connect) seller onboarding and [Checkout](https://docs.stripe.com/payments/checkout/quickstarts), or the provider's own integration (for example [PayPal/Venmo](https://developer.paypal.com/venmo/)). Store provider credentials on the backend and confirm payment via verified webhooks before marking an order paid. This checkout has no payment-provider backend or configured credentials.

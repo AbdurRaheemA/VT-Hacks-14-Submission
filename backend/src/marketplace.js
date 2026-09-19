@@ -11,6 +11,44 @@ function dateOnly(value = new Date()) {
   return date.toISOString().slice(0, 10);
 }
 
+function completedTotal(items) {
+  return items
+    .filter((item) => !["cancelled", "pending"].includes(item.status))
+    .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+}
+
+async function walletSnapshot(nessie, accountId) {
+  const account = await nessie.accounts.get(accountId);
+  const [deposits, withdrawals, purchases] = await Promise.all([
+    nessie.deposits.listByAccount(accountId),
+    nessie.withdrawals.listByAccount(accountId),
+    nessie.purchases.listByAccount(accountId),
+  ]);
+  const ledger = {
+    deposits: completedTotal(deposits),
+    withdrawals: completedTotal(withdrawals),
+    purchases: completedTotal(purchases),
+  };
+  return {
+    account: {
+      ...account,
+      base_balance: Number(account.balance),
+      balance:
+        Number(account.balance) + ledger.deposits - ledger.withdrawals - ledger.purchases,
+    },
+    ledger,
+  };
+}
+
+async function customerCheckingAccount(nessie, customerId) {
+  const accounts = await nessie.accounts.listByCustomer(customerId);
+  const account = accounts.find((item) => item.type?.toLowerCase() === "checking") || accounts[0];
+  if (!account) {
+    throw new MarketplaceSetupError("The customer does not have an account.", { customerId });
+  }
+  return account;
+}
+
 function createdObject(result, resourceName) {
   if (result && typeof result === "object" && result.objectCreated?._id) {
     return result.objectCreated;
@@ -43,7 +81,7 @@ export function createMarketplaceService(nessie) {
   }
 
   return Object.freeze({
-    async createUser({ customer, account = {} }, options) {
+    async createUser({ customer, account = {}, merchant }, options) {
       const customerResult = await nessie.customers.create(customer, options);
       const createdCustomer = createdObject(customerResult, "customer");
       const accountResult = await nessie.accounts.create(
@@ -57,10 +95,21 @@ export function createMarketplaceService(nessie) {
         },
         options,
       );
+      const accountObject = createdObject(accountResult, "account");
+      let merchantResult;
+      let merchantObject;
+      if (merchant) {
+        if (!nessie.merchants?.create) {
+          throw new MarketplaceSetupError("Nessie merchant support is required for seller onboarding.");
+        }
+        merchantResult = await nessie.merchants.create(merchant, options);
+        merchantObject = createdObject(merchantResult, "merchant");
+      }
       return {
         customer: createdCustomer,
-        account: createdObject(accountResult, "account"),
-        raw: { customer: customerResult, account: accountResult },
+        account: accountObject,
+        merchant: merchantObject,
+        raw: { customer: customerResult, account: accountResult, merchant: merchantResult },
       };
     },
 
@@ -76,6 +125,43 @@ export function createMarketplaceService(nessie) {
         },
         options,
       );
+    },
+
+    walletSnapshot(accountId) {
+      return walletSnapshot(nessie, accountId);
+    },
+
+    async getCustomerWallet(customerId) {
+      const account = await customerCheckingAccount(nessie, customerId);
+      return {
+        customerId,
+        ...(await walletSnapshot(nessie, account._id)),
+      };
+    },
+
+    async addCreditsForCustomer(
+      customerId,
+      amount,
+      { description = "Marketplace credit top-up", date, ...options } = {},
+    ) {
+      const account = await customerCheckingAccount(nessie, customerId);
+      const deposit = await nessie.deposits.create(
+        account._id,
+        {
+          medium: "balance",
+          transaction_date: dateOnly(date),
+          status: "completed",
+          amount: positiveAmount(amount),
+          description,
+        },
+        options,
+      );
+      return {
+        customerId,
+        accountId: account._id,
+        deposit,
+        ...(await walletSnapshot(nessie, account._id)),
+      };
     },
 
     async purchaseItem({

@@ -62,6 +62,99 @@ test("maps all marketplace resource write routes and bodies", async () => {
   assert.ok(calls.every(({ init }) => init.method === "POST"));
 });
 
+test("lists customer deposits across the customer's accounts", async () => {
+  const calls = [];
+  const nessie = createNessieClient({
+    apiKey: "test-key",
+    baseUrl: "https://nessie.test",
+    fetch: async (url) => {
+      calls.push(url.pathname);
+      if (url.pathname === "/customers/customer-1/accounts") {
+        return jsonResponse([{ _id: "account-1" }, { _id: "account-2" }]);
+      }
+      if (url.pathname === "/accounts/account-1/deposits") {
+        return jsonResponse([{ _id: "deposit-1", amount: 25 }]);
+      }
+      return jsonResponse([{ _id: "deposit-2", amount: 10, account_id: "account-2" }]);
+    },
+  });
+
+  const deposits = await nessie.deposits.listByCustomer("customer-1");
+
+  assert.deepEqual(calls, [
+    "/customers/customer-1/accounts",
+    "/accounts/account-1/deposits",
+    "/accounts/account-2/deposits",
+  ]);
+  assert.deepEqual(
+    deposits.map((deposit) => [deposit._id, deposit.account_id]),
+    [["deposit-1", "account-1"], ["deposit-2", "account-2"]],
+  );
+});
+
+test("resolves a customer wallet and derives balance from its ledger", async () => {
+  const created = [];
+  const deposits = [{ amount: 25, status: "completed" }];
+  const nessie = {
+    customers: {},
+    accounts: {
+      listByCustomer: async () => [
+        { _id: "account-1", type: "Checking", balance: 500 },
+      ],
+      get: async () => ({ _id: "account-1", type: "Checking", balance: 500 }),
+    },
+    deposits: {
+      listByAccount: async () => deposits,
+      create: async (accountId, body) => {
+        created.push({ accountId, body });
+        deposits.push(body);
+        return { objectCreated: { _id: "deposit-2", ...body } };
+      },
+    },
+    withdrawals: { listByAccount: async () => [] },
+    purchases: { listByAccount: async () => [] },
+  };
+  const marketplace = createMarketplaceService(nessie);
+
+  const before = await marketplace.getCustomerWallet("customer-1");
+  const after = await marketplace.addCreditsForCustomer("customer-1", 10, {
+    date: "2026-09-19",
+  });
+
+  assert.equal(before.account.base_balance, 500);
+  assert.equal(before.account.balance, 525);
+  assert.equal(after.account.balance, 535);
+  assert.equal(after.accountId, "account-1");
+  assert.equal(created[0].accountId, "account-1");
+});
+
+test("creates a customer, wallet account, and seller merchant for an app user", async () => {
+  const calls = [];
+  const nessie = createNessieClient({
+    apiKey: "test-key",
+    baseUrl: "https://nessie.test",
+    fetch: async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      const resource = calls.length === 1 ? "customer" : calls.length === 2 ? "account" : "merchant";
+      return jsonResponse({ objectCreated: { _id: `${resource}-1` } }, { status: 201 });
+    },
+  });
+
+  const result = await createMarketplaceService(nessie).createUser({
+    customer: { first_name: "Alex", last_name: "Rivera" },
+    account: { balance: 500 },
+    merchant: { name: "Alex on Dorm.io" },
+  });
+
+  assert.equal(result.customer._id, "customer-1");
+  assert.equal(result.account._id, "account-1");
+  assert.equal(result.merchant._id, "merchant-1");
+  assert.deepEqual(
+    calls.map(({ url }) => url.pathname),
+    ["/customers", "/customers/customer-1/accounts", "/merchants"],
+  );
+});
+
 test("settles a marketplace purchase into the seller account", async () => {
   const calls = [];
   const nessie = createNessieClient({

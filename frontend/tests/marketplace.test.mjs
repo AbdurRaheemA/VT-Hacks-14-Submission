@@ -9,20 +9,37 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     Object.defineProperty(globalThis, key, { value: dom.window[key], configurable: true });
   }
   const apiCalls = [];
+  let profileOffline = false;
   Object.defineProperty(globalThis, 'fetch', { value: async (url, options = {}) => {
     apiCalls.push({ url, options });
-    if (options.method === 'POST') return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
+    if (url === '/api/session') {
+      const { profile } = JSON.parse(options.body);
+      return Response.json({ user: { id: 'user-1', customerId: 'customer-1', accountId: 'account-1' }, profile, account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 500 } }, { status: 201 });
+    }
+    if (url === '/api/profile') {
+      if (profileOffline) return new Response('', { status: 500 });
+      const { profile } = JSON.parse(options.body);
+      return Response.json({ user: { id: 'user-1', customerId: 'customer-1', accountId: 'account-1' }, profile });
+    }
+    if (url === '/api/wallet/deposits') return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
+    if (url === '/api/listings' && options.method === 'POST') {
+      const listing = JSON.parse(options.body);
+      return Response.json({ listing: { id: '11111111-1111-4111-8111-111111111111', ...listing, sellerUserId: 'user-1', seller: 'Alex Rivera', campus: 'Virginia Tech', sold: false } }, { status: 201 });
+    }
+    if (url === '/api/listings') return Response.json({ listings: [] });
+    if (options.method === 'DELETE') return Response.json({ ok: true });
     return Response.json({ account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 500 } });
   }, configurable: true });
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  const { createElement, act } = await import('react');
+  const { createElement, act, StrictMode } = await import('react');
   const { createRoot } = await import('react-dom/client');
   const server = await createServer({ server: { middlewareMode: true, watch: null }, optimizeDeps: { noDiscovery: true, include: [] }, appType: 'custom' });
   let root;
   try {
     const { default: App } = await server.ssrLoadModule('/src/App.jsx');
     root = createRoot(document.getElementById('root'));
-    await act(async () => root.render(createElement(App)));
+    await act(async () => root.render(createElement(StrictMode, null, createElement(App))));
+    assert.equal(apiCalls.filter(call => call.url === '/api/session').length, 1, 'StrictMode shares one onboarding request');
     const click = async selector => {
       const element = document.querySelector(selector);
       assert.ok(element, `Expected element: ${selector}`);
@@ -66,6 +83,18 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).pickup, 'Newman Library');
     await click('[aria-label="Open profile settings"]');
     assert.equal(document.querySelector('.account-photo-row img').src, document.querySelector('.dorm-user img').src);
+    await type('[name="name"]', 'Unsaved edit');
+    profileOffline = true;
+    await button('Save changes');
+    assert.match(document.querySelector('[role="alert"]').textContent, /Cannot reach the Dorm.io backend/);
+    assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).name, 'Alex Rivera', 'failed saves preserve the last saved profile');
+    assert.match(document.querySelector('.dorm-user').textContent, /Alex Rivera/);
+    profileOffline = false;
+    await type('[name="name"]', 'Alex Rivera');
+    await button('Save changes');
+    assert.equal(document.querySelector('[role="dialog"]'), null, 'save can be retried after connection recovery');
+    assert.ok(apiCalls.filter(call => call.url === '/api/profile').every(call => !('avatar' in JSON.parse(call.options.body).profile)), 'local photo is not uploaded to profile API');
+    await click('[aria-label="Open profile settings"]');
     await type('[name="name"]', 'Unsaved edit');
     await button('Cancel');
     assert.match(document.querySelector('.dorm-user').textContent, /Alex Rivera/);
@@ -176,7 +205,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
     assert.match(document.querySelector('.wallet-card').textContent, /\$480/);
     assert.match(document.querySelector('.deposit-activity').textContent, /Test credits deposited/);
-    const depositCall = apiCalls.find(call => call.options.method === 'POST');
+    const depositCall = apiCalls.find(call => call.url === '/api/wallet/deposits');
     assert.equal(depositCall.url, '/api/wallet/deposits');
     const depositBody = JSON.parse(depositCall.options.body);
     assert.equal(depositBody.amount, 25);
