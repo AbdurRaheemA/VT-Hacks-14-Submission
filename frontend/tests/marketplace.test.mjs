@@ -8,6 +8,12 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
   for (const key of ['window', 'document', 'navigator', 'localStorage', 'HTMLElement', 'Event', 'MouseEvent', 'FormData', 'FileReader']) {
     Object.defineProperty(globalThis, key, { value: dom.window[key], configurable: true });
   }
+  const apiCalls = [];
+  Object.defineProperty(globalThis, 'fetch', { value: async (url, options = {}) => {
+    apiCalls.push({ url, options });
+    if (options.method === 'POST') return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
+    return Response.json({ account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 500 } });
+  }, configurable: true });
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   const { createElement, act } = await import('react');
   const { createRoot } = await import('react-dom/client');
@@ -163,6 +169,18 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
       assert.equal(JSON.parse(localStorage.getItem('dormio-v1-transactions'))[0].status, 'cancelled');
       assert.equal(JSON.parse(localStorage.getItem('dormio-v1-listings')).find(item => item.id === 2).sold, false);
     }
+    await button('Add test credits');
+    await click('input[name="deposit-provider"][value="venmo"]');
+    await button('Add $25 with test Venmo');
+    await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
+    assert.match(document.querySelector('.wallet-card').textContent, /\$480/);
+    assert.match(document.querySelector('.deposit-activity').textContent, /Test credits deposited/);
+    const depositCall = apiCalls.find(call => call.options.method === 'POST');
+    assert.equal(depositCall.url, '/api/wallet/deposits');
+    const depositBody = JSON.parse(depositCall.options.body);
+    assert.equal(depositBody.amount, 25);
+    assert.equal(depositBody.provider, 'venmo');
+    assert.match(depositBody.checkoutId, /^test_[a-z0-9]{32}$/);
   } finally {
     if (root) await act(async () => root.unmount());
     await server.close();
