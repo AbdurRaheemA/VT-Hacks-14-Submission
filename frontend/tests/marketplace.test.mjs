@@ -8,6 +8,18 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
   for (const key of ['window', 'document', 'navigator', 'localStorage', 'HTMLElement', 'Event', 'MouseEvent', 'FormData', 'FileReader']) {
     Object.defineProperty(globalThis, key, { value: dom.window[key], configurable: true });
   }
+  const spoken = [];
+  class MockSpeechSynthesisUtterance {
+    constructor(text) { this.text = text; }
+  }
+  Object.defineProperty(dom.window, 'SpeechSynthesisUtterance', { value: MockSpeechSynthesisUtterance, configurable: true });
+  Object.defineProperty(dom.window, 'speechSynthesis', { value: {
+    speak: utterance => spoken.push(utterance.text),
+    cancel: () => {},
+    getVoices: () => [{ name: 'Test Voice', lang: 'en-US', voiceURI: 'test-voice' }],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }, configurable: true });
   const apiCalls = [];
   let profileOffline = false;
   Object.defineProperty(globalThis, 'fetch', { value: async (url, options = {}) => {
@@ -43,6 +55,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
   let root;
   try {
     const { default: App } = await server.ssrLoadModule('/src/App.jsx');
+    const { speechTextFor } = await server.ssrLoadModule('/src/useReadAloud.js');
     root = createRoot(document.getElementById('root'));
     await act(async () => root.render(createElement(StrictMode, null, createElement(App))));
     assert.equal(apiCalls.filter(call => call.url === '/api/session').length, 1, 'StrictMode shares one onboarding request');
@@ -68,12 +81,31 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(document.querySelectorAll('.product-card').length, 13);
     assert.equal(document.querySelectorAll('.dorm-arrivals-track .product-card').length, 5);
     assert.equal(document.querySelectorAll('.dorm-product-grid .product-card').length, 8);
+    assert.match(document.querySelector('.speech-toolbar').textContent, /Read aloud on/);
+    assert.equal(JSON.parse(localStorage.getItem('dormio-speech')).enabled, true, 'read aloud is opt-out');
+    document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    document.querySelector('.post-item').focus();
+    await act(async () => new Promise(resolve => setTimeout(resolve, 100)));
+    assert.match(spoken.at(-1), /Post Item/);
+    const firstCard = document.querySelector('.product-card');
+    firstCard.dispatchEvent(new dom.window.MouseEvent('pointerover', { bubbles: true, relatedTarget: document.body }));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 650)));
+    assert.match(spoken.at(-1), /condition. Sold by/);
+    firstCard.dispatchEvent(new dom.window.MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body }));
+    assert.match(speechTextFor(firstCard.querySelector('img')), /^Image of .+ listing\./);
+    const textbooksCategory = [...document.querySelectorAll('.dorm-categories button')].find(element => element.textContent.includes('Textbooks'));
+    assert.equal(speechTextFor(textbooksCategory), 'books emoji. Textbooks. Button.');
     assert.ok([...document.querySelectorAll('img')].every(img => img.getAttribute('src')?.includes('/assets/images/')), JSON.stringify([...document.querySelectorAll('img')].map(img => ({ alt: img.alt, src: img.getAttribute('src') }))));
     await click('[aria-label="Switch to dark mode"]');
     assert.equal(document.documentElement.dataset.theme, 'dark');
     assert.equal(JSON.parse(localStorage.getItem('dormio-theme')), 'dark');
     const originalAvatar = document.querySelector('.dorm-user img').src;
     await click('[aria-label="Open profile settings"]');
+    await click('[aria-label="Point to speak"]');
+    assert.equal(JSON.parse(localStorage.getItem('dormio-speech')).enabled, false);
+    assert.match(document.querySelector('.speech-toolbar').textContent, /Read aloud off/);
+    await click('[aria-label="Point to speak"]');
+    assert.equal(JSON.parse(localStorage.getItem('dormio-speech')).enabled, true);
     assert.equal(document.querySelector('.account-photo-row img').src, originalAvatar);
     await type('[name="name"]', 'Alex Rivera');
     assert.equal(document.querySelector('[name="campus"]').value, 'Virginia Tech');
