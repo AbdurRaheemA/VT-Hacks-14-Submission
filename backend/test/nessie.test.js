@@ -149,6 +149,7 @@ test("creates a customer, wallet account, and seller merchant for an app user", 
   assert.equal(result.customer._id, "customer-1");
   assert.equal(result.account._id, "account-1");
   assert.equal(result.merchant._id, "merchant-1");
+  assert.equal(calls[1].body.nickname, "Alex Rivera");
   assert.deepEqual(
     calls.map(({ url }) => url.pathname),
     ["/customers", "/customers/customer-1/accounts", "/merchants"],

@@ -244,7 +244,7 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
 
         const created = await marketplace.createUser({
           customer: customerInput(profile),
-          account: { nickname: "Dorm.io wallet", balance: 500 },
+          account: { balance: 500 },
           merchant: {
             name: `${profile.name} on Dorm.io`,
             category: "Campus marketplace",
@@ -296,7 +296,10 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
           return;
         }
         if (normalizeName(profile.name) !== normalizeName(user.profile.name)) {
-          await nessie.customers.update(user.customerId, customerInput(profile));
+          await Promise.all([
+            nessie.customers.update(user.customerId, customerInput(profile)),
+            nessie.accounts.update(user.accountId, { nickname: profile.name }),
+          ]);
         }
         const updated = await store.updateUser(user.id, { profile, updatedAt: new Date().toISOString() });
         sendJson(response, 200, { user: publicUser(updated), profile: updated.profile });

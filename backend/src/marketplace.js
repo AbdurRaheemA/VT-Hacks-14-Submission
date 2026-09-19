@@ -84,14 +84,18 @@ export function createMarketplaceService(nessie) {
     async createUser({ customer, account = {}, merchant }, options) {
       const customerResult = await nessie.customers.create(customer, options);
       const createdCustomer = createdObject(customerResult, "customer");
+      const customerAccountName = [customer.first_name, customer.last_name]
+        .filter((part) => typeof part === "string" && part.trim())
+        .map((part) => part.trim())
+        .join(" ");
       const accountResult = await nessie.accounts.create(
         createdCustomer._id,
         {
           type: "Checking",
-          nickname: "Marketplace credits",
           rewards: 0,
           balance: 0,
           ...account,
+          nickname: customerAccountName,
         },
         options,
       );

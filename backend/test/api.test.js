@@ -68,7 +68,7 @@ test('saving an existing name switches wallet without renaming or overwriting ei
 });
 
 function fixture({ purchaseItem } = {}) {
-  const calls = { createUsers: [], accountIds: [], updates: [], deposits: [], purchases: [] };
+  const calls = { createUsers: [], accountIds: [], accountUpdates: [], updates: [], deposits: [], purchases: [] };
   const balances = new Map([
     ["account-1", 500],
     ["account-2", 700],
@@ -85,6 +85,10 @@ function fixture({ purchaseItem } = {}) {
           balance: balances.get(accountId) ?? 0,
           account_number: "1234567890123456",
         };
+      },
+      update: async (...input) => {
+        calls.accountUpdates.push(input);
+        return { code: 202 };
       },
     },
     customers: {
@@ -207,6 +211,7 @@ test("isolates wallet and profile operations by the current session", async () =
   assert.equal(updated.body.profile.name, "Samantha Lee");
   assert.equal(calls.updates[0][0], "customer-2");
   assert.equal(calls.updates[0][1].first_name, "Samantha");
+  assert.deepEqual(calls.accountUpdates[0], ["account-2", { nickname: "Samantha Lee" }]);
 });
 
 test("persists deposit idempotency within the owning user", async () => {
