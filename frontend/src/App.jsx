@@ -5,10 +5,11 @@ import Marketplace, { SiteHeader, CategoryNav, SiteFooter } from './components/M
 import './dorm.css';
 import './settings.css';
 import './payments.css';
+import './chat.css';
 import CampusWallet, { AddCredits, PaymentSetup, PaymentCheckout } from './components/CampusWallet';
 import ProfilePanel, { NessieCustomerChooser } from './components/ProfilePanel';
 import { figmaImage } from './figmaAssets';
-import { bootstrapSession, createListing, deleteListing, depositTestCredits, getListings, purchaseListing, updateProfile } from './api';
+import { bootstrapSession, createConversation, createListing, deleteListing, depositTestCredits, getConversations, getListings, purchaseListing, sendChatMessage, subscribeToChats, updateProfile } from './api';
 
 function useStored(key, fallback, normalize = value => value) {
   const [value, setValue] = useState(() => { try { return normalize(JSON.parse(localStorage.getItem(key)) ?? fallback); } catch { return fallback; } });
@@ -46,6 +47,7 @@ export default function App() {
   const [identityLoading, setIdentityLoading] = useState(false);
   const [identityError, setIdentityError] = useState('');
   const [messages, setMessages] = useStored('dormio-v1-messages', []);
+  const [conversations, setConversations] = useState([]);
   const [modal, setModal] = useState(null);
   const [selected, setSelected] = useState(null);
   const [toast, setToast] = useState('');
@@ -135,6 +137,21 @@ export default function App() {
         : item
     ));
   }, [currentUser, setListings]);
+  useEffect(() => {
+    setConversations([]);
+    if (!currentUser) return;
+    let active = true;
+    getConversations().then(result => {
+      if (active) setConversations(result.conversations || []);
+    }).catch(() => {});
+    const unsubscribe = subscribeToChats(items => {
+      if (active) setConversations(items);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [currentUser?.id]);
   const saveProfile = async next => {
     next = { ...next, campus: 'Virginia Tech' };
     if (!currentUser) {
@@ -194,8 +211,39 @@ export default function App() {
     document.addEventListener('keydown', onKey); document.body.style.overflow = 'hidden';
     return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = ''; previous?.focus(); };
   }, [modal]);
-  const startChat = item => { setActiveChat(item); setModal(null); navigate('Messages'); };
-  const submitMessage = e => { e.preventDefault(); if (!messageText.trim() || !activeChat) return; setMessages(current => [...current, { id: Date.now(), listingId: activeChat.id, text: messageText.trim(), time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]); setMessageText(''); };
+  const startChat = async item => {
+    let nextChat = item;
+    if (item.serverBacked && item.sellerUserId !== currentUser?.id) {
+      try {
+        const { conversation } = await createConversation(item.id);
+        setConversations(current => [conversation, ...current.filter(chat => chat.id !== conversation.id)]);
+        nextChat = { ...item, conversationId: conversation.id, seller: conversation.otherUser.name };
+      } catch (error) {
+        showToast(error.message);
+        return;
+      }
+    }
+    setActiveChat(nextChat);
+    setModal(null);
+    navigate('Messages');
+  };
+  const submitMessage = async e => {
+    e.preventDefault();
+    const text = messageText.trim();
+    if (!text || !activeChat) return;
+    if (activeChat.conversationId) {
+      try {
+        const { conversation } = await sendChatMessage(activeChat.conversationId, text);
+        setConversations(current => [conversation, ...current.filter(chat => chat.id !== conversation.id)]);
+        setMessageText('');
+      } catch (error) {
+        showToast(error.message);
+      }
+      return;
+    }
+    setMessages(current => [...current, { id: Date.now(), listingId: activeChat.id, text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]);
+    setMessageText('');
+  };
   const buyItem = async () => {
     if (checkoutMethod === 'stripe') { setFormError('Stripe checkout requires a backend integration.'); return; }
     if (checkoutMethod === 'wallet' && selected.price > balance) { setFormError('Your demo wallet does not have enough funds for this purchase.'); return; }
@@ -239,7 +287,25 @@ export default function App() {
   const uploadImage = e => { const file = e.target.files[0]; if (!file) return; if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { setFormError('Choose a JPG, PNG, or WebP image.'); return; } if (file.size > 2000000) { setFormError('Choose an image smaller than 2 MB.'); return; } const reader = new FileReader(); reader.onload = () => { setImagePreview(reader.result); setFormError(''); }; reader.readAsDataURL(file); };
   const filtered = listings.filter(item => !item.sold && (page !== 'Saved items' || saved.includes(item.id)) && (page !== 'My listings' || item.own) && (category === 'All finds' || (category === 'Free Stuff' ? item.price === 0 : item.category === category)) && `${item.title} ${item.category}`.toLowerCase().includes(search.toLowerCase()) && item.price <= maxPrice && (condition === 'Any condition' || item.condition === condition)).sort((a, b) => sort === 'low' ? a.price - b.price : sort === 'high' ? b.price - a.price : sort === 'new' ? a.age - b.age : sort === 'popular' ? (b.likes || 0) - (a.likes || 0) : 0);
   const nav = [['Explore', Grid2X2], ['Saved items', Heart], ['Messages', MessageCircle], ['My listings', Tag], ['My wallet', Wallet]];
-  const chatItems = listings.filter(item => messages.some(m => m.listingId === item.id) || item.id === activeChat?.id);
+  const serverChatItems = conversations.map(conversation => {
+    const listing = listings.find(item => item.id === conversation.listing.id);
+    return {
+      ...listing,
+      id: conversation.listing.id,
+      title: conversation.listing.title,
+      price: conversation.listing.price,
+      seller: conversation.otherUser.name,
+      initials: conversation.otherUser.name.charAt(0),
+      color: listing?.color || '#eaded3',
+      conversationId: conversation.id,
+      serverBacked: true,
+    };
+  });
+  const serverListingIds = new Set(serverChatItems.map(item => item.id));
+  const localChatItems = listings.filter(item => !serverListingIds.has(item.id) && (messages.some(message => message.listingId === item.id) || (!activeChat?.conversationId && item.id === activeChat?.id)));
+  const chatItems = [...serverChatItems, ...localChatItems];
+  const activeConversation = conversations.find(conversation => conversation.id === activeChat?.conversationId);
+  const visibleMessages = activeConversation?.messages || messages.filter(message => message.listingId === activeChat?.id);
 
   const onCategory = value => { navigate('Explore'); setCategory(value); };
   return <div className="dorm-app">
@@ -254,7 +320,7 @@ export default function App() {
           setListings(current => current.map(item => item.id === tx.listingId ? { ...item, sold: false } : item));
           showToast('Reservation cancelled. No funds were charged.');
         }} contactSeller={id => { const item = listings.find(item => item.id === id); if (item) startChat(item); }} />}
-        {page === 'Messages' && <><div className="page-heading"><div><div className="eyebrow"><span /> MAKE A CAMPUS CONNECTION</div><h1>A good find starts with hello.</h1><p>Ask a question, arrange a pickup, and keep the conversation going.</p></div></div><div className="messages-layout"><aside className="chat-list"><h3>Your conversations</h3>{chatItems.length ? chatItems.map(item => <button className={activeChat?.id === item.id ? 'active' : ''} onClick={() => setActiveChat(item)} key={item.id}><span className="avatar" style={{ background: item.color }}>{item.initials}</span><span><strong>{item.seller}</strong><small>{item.title}</small></span><ChevronRight size={15} /></button>) : <p>Message a seller from a listing to start a conversation.</p>}</aside><section className="chat-panel">{activeChat ? <><div className="chat-header"><img src={activeChat.image} alt="" /><div><strong>{activeChat.seller}</strong><small>{activeChat.title} · {money(activeChat.price)}</small></div><button className="text-button" onClick={() => openDetail(activeChat)}>View listing</button></div><div className="chat-messages"><div className="chat-demo"><ShieldCheck size={16} /> Demo conversation · Messages are saved on this device.</div>{messages.filter(m => m.listingId === activeChat.id).map(m => <div className="message-bubble" key={m.id}>{m.text}<small>{m.time}<CheckCheck size={13} /></small></div>)}{!messages.some(m => m.listingId === activeChat.id) && <div className="chat-starter"><MessageCircle size={32} /><p>Say hello to {activeChat.seller.split(' ')[0]}.</p><button onClick={() => setMessageText('Hi! Is this still available? I can pick it up on campus.')} className="category">Is this still available?</button></div>}</div><form onSubmit={submitMessage} className="message-form"><input aria-label="Your message" placeholder="Write a friendly hello..." value={messageText} onChange={e => setMessageText(e.target.value)} maxLength={2000} /><button className="primary" aria-label="Send message" disabled={!messageText.trim()}><Send size={18} /></button></form></> : <div className="empty-state"><MessageCircle size={40} /><h3>Your people are right around the corner.</h3><p>Choose a conversation, or find something you love.</p><button className="primary" onClick={() => navigate('Explore')}>Find something good <ArrowRight size={16} /></button></div>}</section></div></>}
+        {page === 'Messages' && <><div className="page-heading"><div><div className="eyebrow"><span /> MAKE A CAMPUS CONNECTION</div><h1>A good find starts with hello.</h1><p>Ask a question, arrange a pickup, and keep the conversation going.</p></div></div><div className="messages-layout"><aside className="chat-list"><h3>Your conversations</h3>{chatItems.length ? chatItems.map(item => <button className={(activeChat?.conversationId || activeChat?.id) === (item.conversationId || item.id) ? 'active' : ''} onClick={() => setActiveChat(item)} key={item.conversationId || item.id}><span className="avatar" style={{ background: item.color }}>{item.initials}</span><span><strong>{item.seller}</strong><small>{item.title}</small></span><ChevronRight size={15} /></button>) : <p>Message a seller from a listing to start a conversation.</p>}</aside><section className="chat-panel">{activeChat ? <><div className="chat-header">{activeChat.image ? <img src={activeChat.image} alt="" /> : <span className="avatar" style={{ background: activeChat.color }}>{activeChat.initials}</span>}<div><strong>{activeChat.seller}</strong><small>{activeChat.title} · {money(activeChat.price || 0)}</small></div>{activeChat.image && <button className="text-button" onClick={() => openDetail(activeChat)}>View listing</button>}</div><div className="chat-messages"><div className="chat-demo"><ShieldCheck size={16} /> {activeChat.conversationId ? 'Live for this backend session · Messages clear when the backend restarts.' : 'Demo conversation · Messages are saved on this device.'}</div>{visibleMessages.map(message => <div className={`message-bubble ${activeChat.conversationId && message.senderUserId !== currentUser?.id ? 'incoming' : ''}`} key={message.id}>{message.text}<small>{message.createdAt ? new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : message.time}<CheckCheck size={13} /></small></div>)}{visibleMessages.length === 0 && <div className="chat-starter"><MessageCircle size={32} /><p>Say hello to {activeChat.seller.split(' ')[0]}.</p><button onClick={() => setMessageText('Hi! Is this still available? I can pick it up on campus.')} className="category">Is this still available?</button></div>}</div><form onSubmit={submitMessage} className="message-form"><input aria-label="Your message" placeholder="Write a friendly hello..." value={messageText} onChange={e => setMessageText(e.target.value)} maxLength={2000} /><button className="primary" aria-label="Send message" disabled={!messageText.trim()}><Send size={18} /></button></form></> : <div className="empty-state"><MessageCircle size={40} /><h3>Your people are right around the corner.</h3><p>Choose a conversation, or find something you love.</p><button className="primary" onClick={() => navigate('Explore')}>Find something good <ArrowRight size={16} /></button></div>}</section></div></>}
     </main>
     <SiteFooter {...{ navigate, onCategory, setModal }} />
     {toast && <div className="toast" role="status"><Check size={18} />{toast}</div>}

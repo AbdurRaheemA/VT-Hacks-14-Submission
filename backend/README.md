@@ -52,6 +52,10 @@ local store keeps their IDs against an opaque HttpOnly session.
 - `GET|POST /api/listings` persist user-owned listings.
 - `POST /api/listings/:id/purchase` resolves both users server-side and records
   a buyer purchase plus seller deposit through Nessie.
+- `POST /api/listings/:id/conversations` opens a buyer-seller conversation.
+- `GET /api/chats` and `POST /api/chats/:id/messages` read and send messages.
+- `GET /api/chats/events` streams live conversation updates with server-sent
+  events.
 
 Demo access is by name: `POST /api/session` with `{ "name": "John String" }`
 opens the matching Nessie customer and wallet. Keep the returned cookie for
@@ -70,6 +74,10 @@ Nessie is authoritative for customer names, checking accounts, deposits,
 withdrawals, purchases, and wallet balances. The local store remains
 authoritative only for concepts Nessie does not model: sessions, profile bio and
 year, merchant linkage, listings, orders, and idempotency records.
+
+Chats are intentionally held only in backend memory. Only the listing's buyer
+and seller can read or send messages, and every open browser receives live
+updates. Restarting the backend clears all conversations.
 
 ## Raw Nessie wrapper
 

@@ -74,3 +74,34 @@ export function purchaseListing(id, checkoutId) {
     body: JSON.stringify({ checkoutId }),
   });
 }
+
+export function getConversations() {
+  return request('/api/chats');
+}
+
+export function createConversation(listingId) {
+  return request(`/api/listings/${encodeURIComponent(listingId)}/conversations`, {
+    method: 'POST',
+  });
+}
+
+export function sendChatMessage(conversationId, text) {
+  return request(`/api/chats/${encodeURIComponent(conversationId)}/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function subscribeToChats(onConversations) {
+  if (typeof EventSource === 'undefined') return () => {};
+  const source = new EventSource('/api/chats/events', { withCredentials: true });
+  source.addEventListener('chats', event => {
+    try {
+      onConversations(JSON.parse(event.data).conversations || []);
+    } catch {
+      // ignore malformed live updates
+    }
+  });
+  return () => source.close();
+}

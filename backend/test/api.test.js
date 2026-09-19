@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { createApiHandler } from "../src/api.js";
@@ -29,6 +30,27 @@ async function invoke(handler, { method = "GET", path, body, cookie } = {}) {
 
 function cookieFrom(response) {
   return response.headers["set-cookie"].split(";")[0];
+}
+
+async function openChatStream(handler, cookie) {
+  const request = Object.assign(new EventEmitter(), {
+    method: "GET",
+    url: "/api/chats/events",
+    headers: { cookie },
+    async *[Symbol.asyncIterator]() {},
+  });
+  const result = { chunks: [] };
+  const response = {
+    writeHead(status, headers) {
+      result.status = status;
+      result.headers = headers;
+    },
+    write(value) {
+      result.chunks.push(value);
+    },
+  };
+  await handler(request, response);
+  return { request, result };
 }
 
 test('matching names on separate devices share one wallet and retain both sessions', async () => {
@@ -350,4 +372,81 @@ test("persists a retryable order when the buyer charge succeeds before seller cr
   assert.equal(response.body.order.purchase.objectCreated._id, "purchase-partial");
   assert.equal(repeated.status, 200);
   assert.equal(repeated.body.order.id, response.body.order.id);
+});
+
+test("keeps listing conversations in memory and limits them to both participants", async () => {
+  const { handler } = fixture();
+  const seller = await invoke(handler, {
+    method: "POST",
+    path: "/api/session",
+    body: { profile: { name: "Seller Student" } },
+  });
+  const buyer = await invoke(handler, {
+    method: "POST",
+    path: "/api/session",
+    body: { profile: { name: "Buyer Student" } },
+  });
+  const outsider = await invoke(handler, {
+    method: "POST",
+    path: "/api/session",
+    body: { profile: { name: "Other Student" } },
+  });
+  const created = await invoke(handler, {
+    method: "POST",
+    path: "/api/listings",
+    cookie: cookieFrom(seller),
+    body: {
+      title: "Desk lamp",
+      price: 18.5,
+      category: "Dorm essentials",
+      condition: "Good",
+      description: "A useful lamp for a dorm desk.",
+      image: "data:image/png;base64,iVBORw0KGgo=",
+    },
+  });
+
+  const started = await invoke(handler, {
+    method: "POST",
+    path: `/api/listings/${created.body.listing.id}/conversations`,
+    cookie: cookieFrom(buyer),
+  });
+  const repeated = await invoke(handler, {
+    method: "POST",
+    path: `/api/listings/${created.body.listing.id}/conversations`,
+    cookie: cookieFrom(buyer),
+  });
+  assert.equal(started.status, 200);
+  assert.equal(repeated.body.conversation.id, started.body.conversation.id);
+  assert.equal(started.body.conversation.otherUser.name, "Seller Student");
+
+  const live = await openChatStream(handler, cookieFrom(seller));
+  assert.equal(live.result.status, 200);
+  assert.match(live.result.headers["content-type"], /text\/event-stream/);
+
+  const sent = await invoke(handler, {
+    method: "POST",
+    path: `/api/chats/${started.body.conversation.id}/messages`,
+    cookie: cookieFrom(buyer),
+    body: { text: "Is this still available?" },
+  });
+  assert.equal(sent.status, 201);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(live.result.chunks.join(""), /Is this still available\?/);
+  live.request.emit("close");
+
+  const sellerChats = await invoke(handler, {
+    path: "/api/chats",
+    cookie: cookieFrom(seller),
+  });
+  assert.equal(sellerChats.status, 200);
+  assert.equal(sellerChats.body.conversations[0].otherUser.name, "Buyer Student");
+  assert.equal(sellerChats.body.conversations[0].messages[0].text, "Is this still available?");
+
+  const forbidden = await invoke(handler, {
+    method: "POST",
+    path: `/api/chats/${started.body.conversation.id}/messages`,
+    cookie: cookieFrom(outsider),
+    body: { text: "Hello" },
+  });
+  assert.equal(forbidden.status, 403);
 });

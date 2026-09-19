@@ -1,0 +1,14 @@
+.message-bubble.incoming {
+  align-self: flex-start;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px 10px 10px 2px;
+}
+
+.message-bubble.incoming small {
+  justify-content: flex-start;
+}
+
+[data-theme=dark] .message-bubble.incoming {
+  background: #262330;
+}

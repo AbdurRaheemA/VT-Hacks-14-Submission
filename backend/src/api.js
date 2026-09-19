@@ -205,6 +205,8 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
   if (!store) throw new TypeError("store is required.");
   // serialize identity changes in this single-process demo.
   let identityQueue = Promise.resolve();
+  const conversations = new Map();
+  const chatClients = new Map();
   function identityChange(work) {
     const result = identityQueue.then(work);
     identityQueue = result.catch(() => {});
@@ -317,6 +319,55 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
   async function refreshUser(user) {
     const customer = await nessie.customers.get(user.customerId);
     return adoptCustomer(customer, user.profile);
+  }
+
+  function isParticipant(conversation, userId) {
+    return conversation.buyerUserId === userId || conversation.sellerUserId === userId;
+  }
+
+  async function publicConversation(conversation, viewerId) {
+    const listing = await store.getListing(conversation.listingId);
+    const otherUserId =
+      conversation.buyerUserId === viewerId
+        ? conversation.sellerUserId
+        : conversation.buyerUserId;
+    const otherUser = await store.getUser(otherUserId);
+    return {
+      id: conversation.id,
+      listing: listing
+        ? { id: listing.id, title: listing.title, price: listing.price }
+        : { id: conversation.listingId, title: "Listing unavailable" },
+      otherUser: { id: otherUserId, name: otherUser?.profile?.name || "Dorm.io user" },
+      messages: conversation.messages,
+      createdAt: conversation.createdAt,
+    };
+  }
+
+  async function conversationsFor(userId) {
+    const visible = [...conversations.values()].filter((conversation) =>
+      isParticipant(conversation, userId),
+    );
+    return Promise.all(visible.map((conversation) => publicConversation(conversation, userId)));
+  }
+
+  function pushChats(userId) {
+    const clients = chatClients.get(userId);
+    if (!clients?.size) return;
+    conversationsFor(userId).then((items) => {
+      const event = `event: chats\ndata: ${JSON.stringify({ conversations: items })}\n\n`;
+      for (const client of clients) {
+        try {
+          client.write(event);
+        } catch {
+          clients.delete(client);
+        }
+      }
+    }).catch(() => {});
+  }
+
+  function notifyConversation(conversation) {
+    pushChats(conversation.buyerUserId);
+    pushChats(conversation.sellerUserId);
   }
 
   return async function handle(request, response) {
@@ -452,6 +503,96 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
         };
         await store.putIdempotency(idempotencyKey, result);
         sendJson(response, 201, result);
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/chats") {
+        const user = await requireUser(request);
+        sendJson(response, 200, { conversations: await conversationsFor(user.id) });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/chats/events") {
+        const user = await requireUser(request);
+        response.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+          connection: "keep-alive",
+          "x-accel-buffering": "no",
+        });
+        response.write(`event: chats\ndata: ${JSON.stringify({ conversations: await conversationsFor(user.id) })}\n\n`);
+        const clients = chatClients.get(user.id) || new Set();
+        clients.add(response);
+        chatClients.set(user.id, clients);
+        const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 25_000);
+        request.on("close", () => {
+          clearInterval(heartbeat);
+          clients.delete(response);
+          if (clients.size === 0) chatClients.delete(user.id);
+        });
+        return;
+      }
+
+      const conversationListingMatch = url.pathname.match(
+        /^\/api\/listings\/([a-f0-9-]+)\/conversations$/i,
+      );
+      if (request.method === "POST" && conversationListingMatch) {
+        const buyer = await requireUser(request);
+        const listing = await store.getListing(conversationListingMatch[1]);
+        if (!listing || listing.deletedAt) throw new ApiError(404, "listing not found.");
+        if (!listing.sellerUserId) throw new ApiError(409, "seller chat is unavailable.");
+        if (listing.sellerUserId === buyer.id) {
+          throw new ApiError(400, "you cannot start a conversation with yourself.");
+        }
+        let conversation = [...conversations.values()].find(
+          (item) =>
+            item.listingId === listing.id &&
+            item.buyerUserId === buyer.id &&
+            item.sellerUserId === listing.sellerUserId,
+        );
+        if (!conversation) {
+          conversation = {
+            id: randomUUID(),
+            listingId: listing.id,
+            buyerUserId: buyer.id,
+            sellerUserId: listing.sellerUserId,
+            messages: [],
+            createdAt: new Date().toISOString(),
+          };
+          conversations.set(conversation.id, conversation);
+        }
+        notifyConversation(conversation);
+        sendJson(response, 200, { conversation: await publicConversation(conversation, buyer.id) });
+        return;
+      }
+
+      const chatMessageMatch = url.pathname.match(
+        /^\/api\/chats\/([a-f0-9-]+)\/messages$/i,
+      );
+      if (request.method === "POST" && chatMessageMatch) {
+        const user = await requireUser(request);
+        const conversation = conversations.get(chatMessageMatch[1]);
+        if (!conversation) throw new ApiError(404, "conversation not found.");
+        if (!isParticipant(conversation, user.id)) {
+          throw new ApiError(403, "you are not part of this conversation.");
+        }
+        const body = await readJson(request);
+        if (typeof body.text !== "string" || !body.text.trim()) {
+          throw new ApiError(400, "message text is required.");
+        }
+        const message = {
+          id: randomUUID(),
+          senderUserId: user.id,
+          senderName: user.profile.name,
+          text: body.text.trim().slice(0, 2_000),
+          createdAt: new Date().toISOString(),
+        };
+        conversation.messages.push(message);
+        notifyConversation(conversation);
+        sendJson(response, 201, {
+          message,
+          conversation: await publicConversation(conversation, user.id),
+        });
         return;
       }
 
