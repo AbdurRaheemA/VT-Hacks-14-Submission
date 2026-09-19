@@ -18,7 +18,12 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     }
     if (url === '/api/profile') {
       if (profileOffline) return new Response('', { status: 500 });
-      const { profile } = JSON.parse(options.body);
+      const { profile, customerId } = JSON.parse(options.body);
+      if (profile.name.toLowerCase() === 'twin student' && !customerId) return Response.json({ error: 'More than one Nessie customer uses this display name.', code: 'AMBIGUOUS_NESSIE_CUSTOMER', candidates: [
+        { customerId: 'twin-1', name: 'Twin Student', accounts: [{ accountId: 'twin-account-1', nickname: 'First wallet', type: 'Checking', balance: 800 }] },
+        { customerId: 'twin-2', name: 'Twin Student', accounts: [{ accountId: 'twin-account-2', nickname: 'Second wallet', type: 'Checking', balance: 225 }] },
+      ] }, { status: 409 });
+      if (customerId === 'twin-2') return Response.json({ switched: true, user: { id: 'twin-user-2', customerId, accountId: 'twin-account-2' }, profile: { ...profile, name: 'Twin Student' }, account: { id: 'twin-account-2', balance: 225 } });
       if (profile.name.toLowerCase() === 'john string') return Response.json({ switched: true, user: { id: 'john-user', accountId: 'john-account' }, profile: { ...profile, name: 'John String', bio: 'Existing John profile' }, account: { id: 'john-account', balance: 675 } });
       return Response.json({ user: { id: 'user-1', customerId: 'customer-1', accountId: 'account-1' }, profile });
     }
@@ -212,6 +217,15 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(depositBody.amount, 25);
     assert.equal(depositBody.provider, 'venmo');
     assert.match(depositBody.checkoutId, /^test_[a-z0-9]{32}$/);
+    await click('[aria-label="Open profile settings"]');
+    await type('[name="name"]', 'Twin Student');
+    await button('Save changes');
+    assert.match(document.querySelector('[role="dialog"]').textContent, /Choose your Nessie account/);
+    assert.equal(document.querySelectorAll('.nessie-candidate').length, 2);
+    await click('.nessie-candidate:nth-child(2)');
+    await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
+    assert.match(document.querySelector('.dorm-user').textContent, /Twin Student/);
+    assert.match(document.querySelector('.wallet-card').textContent, /\$225/);
     await click('[aria-label="Open profile settings"]');
     await type('[name="name"]', 'John String');
     await button('Save changes');

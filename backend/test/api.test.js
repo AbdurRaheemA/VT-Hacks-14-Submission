@@ -73,6 +73,8 @@ function fixture({ purchaseItem } = {}) {
     ["account-1", 500],
     ["account-2", 700],
   ]);
+  const customers = new Map();
+  const accountsByCustomer = new Map();
   let userNumber = 0;
   const nessie = {
     accounts: {
@@ -90,10 +92,18 @@ function fixture({ purchaseItem } = {}) {
         calls.accountUpdates.push(input);
         return { code: 202 };
       },
+      listByCustomer: async (customerId) => {
+        const accountId = accountsByCustomer.get(customerId);
+        return accountId ? [await nessie.accounts.get(accountId)] : [];
+      },
     },
     customers: {
+      list: async () => [...customers.values()],
+      get: async (customerId) => customers.get(customerId),
       update: async (...input) => {
         calls.updates.push(input);
+        const [customerId, changes] = input;
+        customers.set(customerId, { ...customers.get(customerId), ...changes, _id: customerId });
         return { code: 202 };
       },
     },
@@ -102,9 +112,13 @@ function fixture({ purchaseItem } = {}) {
     createUser: async (input) => {
       userNumber += 1;
       calls.createUsers.push(input);
+      const customerId = `customer-${userNumber}`;
+      const accountId = `account-${userNumber}`;
+      customers.set(customerId, { ...input.customer, _id: customerId });
+      accountsByCustomer.set(customerId, accountId);
       return {
-        customer: { _id: `customer-${userNumber}` },
-        account: { _id: `account-${userNumber}` },
+        customer: { _id: customerId },
+        account: { _id: accountId },
         merchant: { _id: `merchant-${userNumber}` },
       };
     },

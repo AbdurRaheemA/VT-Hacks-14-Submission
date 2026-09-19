@@ -54,6 +54,10 @@ export function createAppStore({ filePath, initialState } = {}) {
       await load();
       return copy(Object.values(state.users).find(user => normalizeName(user.profile.name) === normalizeName(name)));
     },
+    async getUserByCustomerId(customerId) {
+      await load();
+      return copy(Object.values(state.users).find(user => user.customerId === customerId));
+    },
     async getUser(id) {
       await load();
       return copy(state.users[id]);

@@ -132,6 +132,19 @@ function customerInput(profile) {
   return { ...customerName(profile.name), address: campusAddress };
 }
 
+function customerDisplayName(customer) {
+  return [customer.first_name, customer.last_name]
+    .filter((part) => typeof part === "string" && part.trim())
+    .map((part) => part.trim())
+    .join(" ");
+}
+
+function createdObject(result, resourceName) {
+  const object = result && typeof result === "object" ? result.objectCreated : undefined;
+  if (!object?._id) throw new ApiError(502, `Nessie did not return the created ${resourceName}.`);
+  return object;
+}
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -190,7 +203,7 @@ function validateListing(body) {
 
 export function createApiHandler({ nessie, marketplace, store, secureCookies = false }) {
   if (!store) throw new TypeError("store is required.");
-  // Serialize name resolution and session attachment in this single-process demo.
+  // serialize identity changes in this single-process demo.
   let identityQueue = Promise.resolve();
   function identityChange(work) {
     const result = identityQueue.then(work);
@@ -212,7 +225,98 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
   async function requireUser(request) {
     const user = await currentUser(request);
     if (!user) throw new ApiError(401, "Start a Dorm.io session before using this route.");
-    return user;
+    return refreshUser(user);
+  }
+
+  async function matchingCustomers(name) {
+    const normalized = normalizeName(name);
+    return (await nessie.customers.list()).filter(
+      (customer) => normalizeName(customerDisplayName(customer)) === normalized,
+    );
+  }
+
+  async function customerCandidates(customers) {
+    return Promise.all(
+      customers.map(async (customer) => {
+        const accounts = await nessie.accounts.listByCustomer(customer._id);
+        return {
+          customerId: customer._id,
+          name: customerDisplayName(customer),
+          accounts: accounts.map((account) => ({
+            accountId: account._id,
+            nickname: account.nickname,
+            type: account.type,
+            balance: account.balance,
+          })),
+        };
+      }),
+    );
+  }
+
+  async function resolveCustomer(name, customerId) {
+    const matches = await matchingCustomers(name);
+    if (customerId) {
+      const selected = matches.find((customer) => customer._id === customerId);
+      if (!selected) throw new ApiError(400, "customerId does not match the requested name.");
+      return selected;
+    }
+    if (matches.length > 1) {
+      const error = new ApiError(409, "More than one Nessie customer uses this display name.");
+      error.code = "AMBIGUOUS_NESSIE_CUSTOMER";
+      error.candidates = await customerCandidates(matches);
+      throw error;
+    }
+    return matches[0];
+  }
+
+  async function ensureAccount(customer, profile) {
+    const accounts = await nessie.accounts.listByCustomer(customer._id);
+    const existing =
+      accounts.find((account) => account.type?.toLowerCase() === "checking") || accounts[0];
+    if (existing) return existing;
+    const result = await nessie.accounts.create(customer._id, {
+      type: "Checking",
+      nickname: customerDisplayName(customer) || profile.name,
+      rewards: 0,
+      balance: 500,
+    });
+    return createdObject(result, "account");
+  }
+
+  async function adoptCustomer(customer, requestedProfile) {
+    const name = customerDisplayName(customer) || requestedProfile.name;
+    const account = await ensureAccount(customer, requestedProfile);
+    const existing = await store.getUserByCustomerId(customer._id);
+    if (existing) {
+      const profile = { ...existing.profile, name, campus: "Virginia Tech" };
+      return store.updateUser(existing.id, {
+        customerId: customer._id,
+        accountId: account._id,
+        profile,
+        syncedAt: new Date().toISOString(),
+      });
+    }
+    const merchantResult = await nessie.merchants.create({
+      name: `${name} on Dorm.io`,
+      category: "Campus marketplace",
+      address: campusAddress,
+      geocode: campusGeocode,
+    });
+    return store.createUser({
+      id: randomUUID(),
+      sessionHashes: [],
+      customerId: customer._id,
+      accountId: account._id,
+      merchantId: createdObject(merchantResult, "merchant")._id,
+      profile: { ...requestedProfile, name, campus: "Virginia Tech" },
+      createdAt: new Date().toISOString(),
+      syncedAt: new Date().toISOString(),
+    });
+  }
+
+  async function refreshUser(user) {
+    const customer = await nessie.customers.get(user.customerId);
+    return adoptCustomer(customer, user.profile);
   }
 
   return async function handle(request, response) {
@@ -231,14 +335,17 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
         await identityChange(async () => {
         const existing = await currentUser(request);
         const profile = validateProfile(body.name !== undefined ? { name: body.name } : body.profile);
-        const matched = await store.getUserByName(profile.name);
-        const selected = body.name === undefined && existing ? existing : matched;
+        const selected =
+          body.name === undefined && body.customerId === undefined && existing
+            ? await refreshUser(existing)
+            : await resolveCustomer(profile.name, body.customerId);
         if (selected) {
+          const user = selected.customerId ? selected : await adoptCustomer(selected, profile);
           sendJson(response, 200, {
-            user: publicUser(selected),
-            profile: selected.profile,
-            ...(await walletSnapshot(nessie, selected.accountId)),
-          }, await attachSession(selected));
+            user: publicUser(user),
+            profile: user.profile,
+            ...(await walletSnapshot(nessie, user.accountId)),
+          }, await attachSession(user));
           return;
         }
 
@@ -252,10 +359,9 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
             geocode: campusGeocode,
           },
         });
-        const token = randomBytes(32).toString('hex');
         const user = await store.createUser({
           id: randomUUID(),
-          sessionHash: createHash('sha256').update(token).digest('hex'),
+          sessionHashes: [],
           customerId: created.customer._id,
           accountId: created.account._id,
           merchantId: created.merchant._id,
@@ -270,7 +376,7 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
             profile,
             ...(await walletSnapshot(nessie, user.accountId)),
           },
-          { "set-cookie": sessionCookie(token, secureCookies) },
+          await attachSession(user),
         );
         });
         return;
@@ -287,21 +393,28 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
         await identityChange(async () => {
         const user = await requireUser(request);
         const profile = validateProfile(body.profile);
-        const matched = await store.getUserByName(profile.name);
-        if (matched && matched.id !== user.id) {
+        const sameName = normalizeName(profile.name) === normalizeName(user.profile.name);
+        const customer = sameName
+          ? await nessie.customers.get(user.customerId)
+          : await resolveCustomer(profile.name, body.customerId);
+        if (customer && customer._id !== user.customerId) {
+          const matched = await adoptCustomer(customer, profile);
           sendJson(response, 200, {
             user: publicUser(matched), profile: matched.profile, switched: true,
             ...(await walletSnapshot(nessie, matched.accountId)),
           }, await attachSession(matched));
           return;
         }
-        if (normalizeName(profile.name) !== normalizeName(user.profile.name)) {
+        if (!sameName) {
           await Promise.all([
             nessie.customers.update(user.customerId, customerInput(profile)),
             nessie.accounts.update(user.accountId, { nickname: profile.name }),
           ]);
         }
-        const updated = await store.updateUser(user.id, { profile, updatedAt: new Date().toISOString() });
+        const nessieProfile = customer
+          ? { ...profile, name: customerDisplayName(customer) }
+          : profile;
+        const updated = await store.updateUser(user.id, { profile: nessieProfile, updatedAt: new Date().toISOString(), syncedAt: new Date().toISOString() });
         sendJson(response, 200, { user: publicUser(updated), profile: updated.profile });
         });
         return;
@@ -396,7 +509,8 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
           throw new ApiError(400, "you cannot purchase your own listing.");
         }
         if (listing.sold) throw new ApiError(409, "listing has already been sold.");
-        const seller = await store.getUser(listing.sellerUserId);
+        const storedSeller = await store.getUser(listing.sellerUserId);
+        const seller = storedSeller ? await refreshUser(storedSeller) : undefined;
         if (!seller?.merchantId || !seller?.accountId) {
           throw new ApiError(409, "seller payment account is unavailable.");
         }
@@ -462,6 +576,8 @@ export function createApiHandler({ nessie, marketplace, store, secureCookies = f
       const status = error instanceof ApiError ? error.status : 502;
       sendJson(response, status, {
         error: status < 500 ? error.message : "Nessie could not complete the request.",
+        ...(error.code ? { code: error.code } : {}),
+        ...(error.candidates ? { candidates: error.candidates } : {}),
       });
     }
   };

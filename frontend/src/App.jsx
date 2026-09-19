@@ -6,7 +6,7 @@ import './dorm.css';
 import './settings.css';
 import './payments.css';
 import CampusWallet, { AddCredits, PaymentSetup, PaymentCheckout } from './components/CampusWallet';
-import ProfilePanel from './components/ProfilePanel';
+import ProfilePanel, { NessieCustomerChooser } from './components/ProfilePanel';
 import { figmaImage } from './figmaAssets';
 import { bootstrapSession, createListing, deleteListing, depositTestCredits, getListings, purchaseListing, updateProfile } from './api';
 
@@ -42,6 +42,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [walletAccount, setWalletAccount] = useState(null);
   const [walletConnectionError, setWalletConnectionError] = useState('');
+  const [identityChoice, setIdentityChoice] = useState(null);
+  const [identityLoading, setIdentityLoading] = useState(false);
+  const [identityError, setIdentityError] = useState('');
   const [messages, setMessages] = useStored('dormio-v1-messages', []);
   const [modal, setModal] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -77,30 +80,41 @@ export default function App() {
     localStorage.setItem('dormio-active-user', user.id);
     setCurrentUser(user);
   };
+  const acceptSession = async ({ user, profile: serverProfile, account }) => {
+    activateUser(user);
+    setProfile(current => ({ ...current, ...serverProfile, avatar: current.avatar }));
+    setWalletAccount(account);
+    setWalletConnectionError('');
+    const { listings: remoteListings } = await getListings();
+    setListings(current => [
+      ...remoteListings.map(item => ({
+        ...item,
+        own: item.sellerUserId === user.id,
+        serverBacked: true,
+        initials: item.seller.charAt(0),
+        color: '#eaded3',
+        age: 0,
+        collection: 'new',
+      })),
+      ...current.filter(item => !item.serverBacked),
+    ]);
+  };
+  const identityConflict = (error, requestedProfile, mode) => {
+    if (error.code !== 'AMBIGUOUS_NESSIE_CUSTOMER' || !error.candidates?.length) return false;
+    setIdentityChoice({ name: requestedProfile.name, candidates: error.candidates, profile: requestedProfile, mode });
+    setIdentityError('');
+    setModal('identity');
+    return true;
+  };
   useEffect(() => {
     let active = true;
-    bootstrapSession(profile).then(async ({ user, profile: serverProfile, account }) => {
+    bootstrapSession(profile).then(async session => {
       if (!active) return;
-      activateUser(user);
-      setProfile(current => ({ ...current, ...serverProfile, avatar: current.avatar }));
-      setWalletAccount(account);
-      setWalletConnectionError('');
-      const { listings: remoteListings } = await getListings();
+      await acceptSession(session);
       if (!active) return;
-      setListings(current => [
-        ...remoteListings.map(item => ({
-          ...item,
-          own: item.sellerUserId === user.id,
-          serverBacked: true,
-          initials: item.seller.charAt(0),
-          color: '#eaded3',
-          age: 0,
-          collection: 'new',
-        })),
-        ...current.filter(item => !item.serverBacked),
-      ]);
-    }).catch(() => {
-      if (active) setWalletConnectionError('Nessie wallet is offline. Showing local demo funds.');
+    }).catch(error => {
+      if (!active) return;
+      if (!identityConflict(error, profile, 'session')) setWalletConnectionError('Nessie wallet is offline. Showing local demo funds.');
     });
     return () => { active = false; };
   }, []);
@@ -128,13 +142,39 @@ export default function App() {
       setCurrentUser(session.user);
       setWalletAccount(session.account);
     }
-    const result = await updateProfile(next);
+    let result;
+    try { result = await updateProfile(next); }
+    catch (error) {
+      if (identityConflict(error, next, 'profile')) return;
+      throw error;
+    }
     activateUser(result.user);
     if (result.account) setWalletAccount(result.account);
     setWalletConnectionError('');
     setProfile({ ...next, ...result.profile, avatar: result.switched ? figmaImage('v13_27') : next.avatar });
     if (!result.switched) setListings(current => current.map(item => item.own ? { ...item, campus: next.campus, initials: next.name.charAt(0), location: next.pickup || 'On campus' } : item));
     setModal(null); showToast(result.switched ? `Opened ${result.profile.name}'s wallet.` : 'Profile updated.');
+  };
+  const chooseNessieCustomer = async customerId => {
+    setIdentityLoading(true);
+    setIdentityError('');
+    try {
+      if (identityChoice.mode === 'profile') {
+        const result = await updateProfile(identityChoice.profile, customerId);
+        activateUser(result.user);
+        if (result.account) setWalletAccount(result.account);
+        setProfile(current => ({ ...current, ...result.profile, avatar: figmaImage('v13_27') }));
+        showToast(`Opened ${result.profile.name}'s wallet.`);
+      } else {
+        await acceptSession(await bootstrapSession(identityChoice.profile, customerId));
+      }
+      setIdentityChoice(null);
+      setModal(null);
+    } catch (error) {
+      setIdentityError(error.message);
+    } finally {
+      setIdentityLoading(false);
+    }
   };
   const navigate = next => { setPage(next); setMobileNav(false); setSearch(''); setCategory('All finds'); };
   const toggleSave = id => setSaved(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
@@ -223,6 +263,7 @@ export default function App() {
       {modal === 'checkout' && <PaymentCheckout {...{ selected, balance, buyItem, paymentDone, startChat, closeModal, navigate }} method={checkoutMethod} setMethod={setCheckoutMethod} error={formError} />}
       {modal === 'addCredits' && <AddCredits onDeposit={addTestCredits} />}
       {modal === 'paymentSetup' && <PaymentSetup methodId={setupMethod} {...{ preferences, closeModal }} save={(method, handle) => { setPreferences(current => ({ ...current, handles: { ...current.handles, [method]: handle } })); closeModal(); showToast('Payment details saved.'); }} />}
+      {modal === 'identity' && identityChoice && <NessieCustomerChooser name={identityChoice.name} candidates={identityChoice.candidates} onSelect={chooseNessieCustomer} loading={identityLoading} error={identityError} />}
       {modal === 'sell' && <form className="modal-body sell-form" onSubmit={submitListing}><div className="eyebrow">PASS IT ON. MAKE SOMEONE’S DAY.</div><h2 id="modal-title">Give it a second chapter.</h2><p>A few details, one photo, and you’re in the loop.</p><label className={`upload-area ${imagePreview ? 'has-image' : ''}`}>{imagePreview ? <img src={imagePreview} alt="Listing preview" /> : <><Plus size={28} /><strong>Add your best photo</strong><span>JPG, PNG, or WebP · Up to 2 MB</span></>}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadImage} aria-label="Upload listing photo" /></label><label>What are you selling?<input name="title" required maxLength={70} placeholder="e.g. Your next favorite desk chair" /></label><div className="form-grid"><label>Category<select name="category">{categories.slice(1).map(([name]) => <option key={name}>{name}</option>)}</select></label><label>Condition<select name="condition"><option>Like new</option><option>Good</option><option>Fair</option></select></label></div><label>Price ($)<input name="price" type="number" min="0" max="10000" step="0.01" placeholder="25.00" required /></label><label>A little about your item<textarea name="description" required maxLength={1200} rows={3} placeholder="The details you’d want to know. Condition, size, pickup spot..." /></label>{formError && <p className="form-error" role="alert">{formError}</p>}<button className="primary full-width" type="submit">Publish listing <ArrowRight size={17} /></button><span className="checkout-note">Your listing is linked to your Dorm.io seller account.</span></form>}
       {modal === 'help' && <div className="modal-body"><div className="eyebrow">GOOD NEIGHBORS. GOOD FINDS.</div><h2 id="modal-title">Welcome to the community.</h2><div className="help-item"><Search /><div><h3>Find your next favorite</h3><p>Browse by category, set a budget, or search for something specific. Save your favorites with the heart.</p></div></div><div className="help-item"><MessageCircle /><div><h3>Say hello, meet on campus</h3><p>Ask sellers about the item and agree on a public pickup spot, like the library or student center.</p></div></div><div className="help-item"><Wallet /><div><h3>Try your campus wallet</h3><p>Everyone starts with $500 in demo funds. Purchases update your balance and history on this device.</p></div></div><div className="help-item"><Leaf /><div><h3>Keep the good things going</h3><p>List items with honest descriptions and clear photos. A little care makes a better campus community.</p></div></div></div>}
       {modal === 'notifications' && <div className="modal-body"><div className="eyebrow">IN THE LOOP</div><h2 id="modal-title">Your campus updates.</h2><div className="help-item"><Sparkles /><div><h3>Welcome to Dorm.io!</h3><p>Your campus marketplace is ready to explore. Find your next favorite or give something a second home.</p></div></div><div className="help-item"><Wallet /><div><h3>Your demo wallet is ready</h3><p>You have {money(balance)} to explore the simulated checkout experience.</p><button className="text-button" onClick={() => { closeModal(); navigate('My wallet'); }}>Open your wallet <ArrowRight size={15} /></button></div></div></div>}

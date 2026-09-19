@@ -35,11 +35,14 @@ Use the moon/sun button in the header to switch themes. Profile settings keep yo
 
 ## Current integration scope
 
-The frontend now creates or resumes a backend app-user session. Each app user is
-mapped to one Nessie customer, checking account, and seller merchant. Profile
-metadata, owned listings, orders, and payment idempotency records are persisted
-by the backend. Wallet purchases of server-backed user listings settle from the
-buyer's mapped account into the seller's mapped account.
+The frontend now creates or resumes a backend app-user session by resolving the
+display name against Nessie. Each app user maps to one Nessie customer, checking
+account, and seller merchant. If Nessie has duplicate names, the frontend asks
+the user to choose the intended wallet rather than selecting one silently.
+Customer names, wallet accounts, and transaction ledgers come from Nessie;
+profile metadata, owned listings, orders, and payment idempotency records are
+persisted by the app backend. Wallet purchases of server-backed user listings
+settle from the buyer's mapped account into the seller's mapped account.
 
 Sample design listings, messages, favorites, payment preferences, transaction
 presentation, and uploaded profile photos still use browser storage under

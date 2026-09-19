@@ -39,9 +39,9 @@ npm run dev
 ```
 
 The frontend proxies `/api` requests to `http://localhost:3001`. On first use,
-the backend creates one Nessie customer, checking account, and seller merchant,
-then stores their IDs against an opaque HttpOnly session. Account and customer
-IDs are resolved by the backend and are never accepted from the browser.
+the backend searches Nessie by normalized display name. It adopts a unique
+existing customer and checking account, or creates them when none exists. The
+local store keeps their IDs against an opaque HttpOnly session.
 
 ## App-user identity
 
@@ -54,17 +54,22 @@ IDs are resolved by the backend and are never accepted from the browser.
   a buyer purchase plus seller deposit through Nessie.
 
 Demo access is by name: `POST /api/session` with `{ "name": "John String" }`
-opens the same persisted app user and Nessie wallet on any device. Keep the
-returned cookie for subsequent wallet requests. Matching ignores case and extra
-spaces; simultaneous first requests create only one user in this single-server
-setup. Existing session cookies continue to work when another device connects.
+opens the matching Nessie customer and wallet. Keep the returned cookie for
+subsequent wallet requests. Matching ignores case and extra spaces. Sessions
+refresh the customer name and checking-account mapping from Nessie.
 
 Saving an existing name in Profile switches to that user's profile and wallet.
 Saving an unused name renames the current user. New sessions with unused names
-create new users. Lookup uses this backend's persisted app-user records; it does
-not merge unrelated customers already present in Nessie. All devices must use
-the same backend and data file. This deliberately provides demo access without
-identity verification; anyone who knows a name can open that demo wallet.
+create new Nessie users. When multiple Nessie customers share a name, the API
+returns `409 AMBIGUOUS_NESSIE_CUSTOMER`; the frontend asks the user to choose by
+account details and a short customer-ID suffix. A submitted customer ID is
+accepted only when it belongs to the requested name. This deliberately provides
+demo access without identity verification.
+
+Nessie is authoritative for customer names, checking accounts, deposits,
+withdrawals, purchases, and wallet balances. The local store remains
+authoritative only for concepts Nessie does not model: sessions, profile bio and
+year, merchant linkage, listings, orders, and idempotency records.
 
 ## Raw Nessie wrapper
 
