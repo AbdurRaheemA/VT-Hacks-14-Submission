@@ -1,11 +1,24 @@
-export const photo = (id, width = 700) => `https://images.unsplash.com/${id}?auto=format&fit=crop&w=${width}&q=85`;
-export const initialListings = [
-  { id: 1, title: 'The perfect study chair', category: 'Furniture', price: 45, original: 120, condition: 'Like new', location: '0.4 mi away', seller: 'Emma W.', initials: 'EW', color: '#e8d8c5', image: photo('photo-1598300042247-d088f8ab3a91'), description: 'Comfortable, minimal, and ready for a new study spot. This chair has only been used for one semester. Pickup near Newman Library.', badge: 'Popular find', age: 2 },
-  { id: 2, title: 'Calculus: Early Transcendentals', category: 'Textbooks', price: 30, original: 165, condition: 'Good', location: '0.2 mi away', seller: 'Alex M.', initials: 'AM', color: '#dde5d5', image: photo('photo-1544947950-fa07a98d237f'), description: 'A trusty companion for your next math class. Some light pencil notes and highlighted sections. Please confirm the edition with your syllabus before buying.', badge: '', age: 3 },
-  { id: 3, title: 'Sony WH-1000XM4 headphones', category: 'Electronics', price: 110, original: 249, condition: 'Like new', location: '0.8 mi away', seller: 'Jordan L.', initials: 'JL', color: '#e3dcef', image: photo('photo-1546435770-a3e426bf472b'), description: 'Noise-canceling headphones for library sessions and long walks across campus. Includes carrying case and charging cable. Everything works great.', badge: 'Great deal', age: 1 },
-  { id: 4, title: 'A little green for your space', category: 'Dorm essentials', price: 12, original: 28, condition: 'Like new', location: '0.3 mi away', seller: 'Sophie K.', initials: 'SK', color: '#eddcce', image: photo('photo-1459411552884-841db9b3cc2a'), description: 'An easygoing plant looking for a sunny windowsill. Ceramic pot included. Perfect for adding a little life to your dorm.', badge: '', age: 4 },
-  { id: 5, title: 'Mid-century bedside table', category: 'Furniture', price: 35, original: 95, condition: 'Good', location: '0.6 mi away', seller: 'Noah R.', initials: 'NR', color: '#dce4df', image: photo('photo-1499933374294-4584851497cc'), description: 'Small-space friendly wooden side table. A few little signs of love, but sturdy and ready for another year on campus.', badge: '', age: 5 },
-  { id: 6, title: 'Your new everyday backpack', category: 'Clothing & more', price: 25, original: 80, condition: 'Like new', location: '1.1 mi away', seller: 'Mia T.', initials: 'MT', color: '#eadfcd', image: photo('photo-1553062407-98eeb64c6a62'), description: 'Room for your laptop, textbooks, and all the snacks. Clean, comfortable, and only used a handful of times.', badge: '', age: 6 },
-  { id: 7, title: 'Introduction to Psychology', category: 'Textbooks', price: 20, original: 110, condition: 'Good', location: '0.5 mi away', seller: 'Ethan B.', initials: 'EB', color: '#dde3ed', image: photo('photo-1497633762265-9d179a990aa6'), description: 'A well-kept introductory psychology textbook with useful highlights. Check your required edition before purchasing.', badge: '', age: 7 },
-  { id: 8, title: 'Slow mornings, better coffee', category: 'Dorm essentials', price: 28, original: 65, condition: 'Like new', location: '0.7 mi away', seller: 'Ava P.', initials: 'AP', color: '#e7dce5', image: photo('photo-1517668808822-9ebb02f2a0e6'), description: 'A compact coffee setup for your morning routine. Freshly cleaned and ready to go. Pickup on campus.', badge: 'Great deal', age: 8 },
+import { figmaImage } from './figmaAssets';
+
+const products = [
+  [1, 'Mini Fridge (Super Clean, Works Perfect)', 45, 'Dorm essentials', 'Marcus Lopez', 'Virginia Tech', 42, 'v13_99'],
+  [2, 'M1 MacBook Air 8GB/256GB Space Gray', 480, 'Electronics', 'Emma Stone', 'Virginia Tech', 128, 'v13_121'],
+  [3, 'Vintage Leather Bomber Jacket (Oversized)', 65, 'Clothing & more', 'Tristan K.', 'Virginia Tech', 95, 'v13_143'],
+  [4, 'Organic Chemistry Textbook 8th Ed.', 30, 'Textbooks', 'Aria Chen', 'Virginia Tech', 12, 'v13_165'],
+  [5, 'Ergonomic Mesh Office Chair (Grey)', 80, 'Furniture', 'Devon R.', 'Virginia Tech', 34, 'v13_188'],
+  [6, 'Instant Pot Duo 7-in-1 Multicooker', 25, 'Dorm essentials', 'Sarah Miller', 'Virginia Tech', 18, 'v13_210'],
+  [7, 'JBL Flip 6 Waterproof Speaker', 55, 'Electronics', 'Lucas Thorne', 'Virginia Tech', 61, 'v13_232'],
+  [8, 'Abstract Rug (Fits Dorm Rooms)', 35, 'Furniture', 'Clara B.', 'Virginia Tech', 50, 'v13_254'],
+  [9, 'Sony WH-1000XM4 Noise Canceling', 150, 'Electronics', 'Jake Tyler', 'Virginia Tech', 9, 'v13_288'],
+  [10, 'Desk Lamp with Wireless Charger Dock', 15, 'Dorm essentials', 'Lina Ross', 'Virginia Tech', 3, 'v13_311'],
+  [11, 'Wooden Shoe Rack (3-Tier)', 12, 'Furniture', 'Ethan Wright', 'Virginia Tech', 7, 'v13_334'],
+  [12, 'Vintage Champion Crewneck', 22, 'Clothing & more', 'Tristan K.', 'Virginia Tech', 14, 'v13_357'],
+  [13, 'Adjustable Dumbbells Set (20lbs)', 40, 'Dorm essentials', 'Mason Cole', 'Virginia Tech', 22, 'v13_380'],
 ];
+const colors = ['#edf2ff', '#e9ddff', '#ffe7ed', '#d8f4e8', '#ffe9d4'];
+export const initialListings = products.map(([id, title, price, category, seller, campus, likes, image], index) => ({
+  id, title, price, category, seller, campus, likes, image: figmaImage(image), initials: seller.charAt(0),
+  color: colors[index % colors.length], condition: index % 3 === 0 ? 'Good' : 'Like new',
+  location: 'Campus pickup', age: 14 - id, collection: id > 8 ? 'new' : 'trending',
+  description: `${title}. A pre-loved campus find looking for its next home. Message ${seller} to confirm the condition and arrange a public campus pickup. This is a sample listing from the Dorm.io design.`,
+}));
