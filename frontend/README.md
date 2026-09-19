@@ -51,6 +51,12 @@ fictional sellers do not have Nessie customers. Payments and student
 verification are simulated. Mobile apps, spotlight sellers, and partnerships
 are design concepts.
 
+For server-backed listings, Message seller opens an in-memory backend
+conversation between the buyer and seller. The Messages page receives live
+updates with server-sent events, so two signed-in browsers can chat without
+refreshing. These conversations are intentionally cleared on backend restart;
+the bundled sample listings retain their browser-only demo messages.
+
 All images are bundled locally. Google Fonts requires internet, with system font fallbacks. No Figma plugin or account is required.
 
 Dorm.io is exclusively for Virginia Tech. Campus labels are fixed to Virginia Tech, including previously saved listings and profiles. The sustainability spotlight is a demo concept.
