@@ -8,6 +8,8 @@
   },
   "scripts": {
     "test": "node --test",
-    "example": "node --env-file=.env examples/list-customers.js"
+    "example": "node --env-file=.env examples/list-customers.js",
+    "dev": "node --env-file=.env --watch src/server.js",
+    "start": "node --env-file=.env src/server.js"
   }
 }

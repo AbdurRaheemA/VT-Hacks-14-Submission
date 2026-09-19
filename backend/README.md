@@ -8,6 +8,7 @@ The existing `backend/.env` should contain:
 
 ```dotenv
 NESSIE_TOKEN=your_nessie_api_key
+NESSIE_ACCOUNT_ID=your_demo_checking_account_id
 ```
 
 Use Node.js 20.12 or newer. No package installation is required.
@@ -19,6 +20,22 @@ npm run example
 ```
 
 The example is read-only. It loads `.env` through Node's `--env-file` option.
+
+Run the wallet API alongside Vite during development:
+
+```sh
+cd backend
+npm run dev
+```
+
+In a second terminal:
+
+```sh
+cd frontend
+npm run dev
+```
+
+The frontend proxies `/api` requests to `http://localhost:3001`. `NESSIE_ACCOUNT_ID` selects the server-side demo wallet; it is never accepted from the browser.
 
 ## Raw Nessie wrapper
 
@@ -74,3 +91,5 @@ Suggested mapping:
 - an optional bill for a pending payment request
 
 Keep listing ownership, order state, seller-to-merchant mappings, and idempotency keys in the app database. Nessie does not provide atomic settlement across a buyer purchase and seller deposit. If the seller deposit fails after the purchase succeeds, `purchaseItem` throws `MarketplaceSettlementError` with the successful purchase response in `error.details`; persist that state and retry or reconcile the seller credit from the backend.
+
+The current Nessie sandbox records deposits without updating the account object's `balance`. The wallet API therefore derives its displayed balance from the account's base balance plus completed deposits, less completed withdrawals and purchases.
