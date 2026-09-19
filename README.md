@@ -9,5 +9,6 @@ Potential Features:
 - text hover to announce (for blind)
 - language switch for pages
 - color blind color pallete
+- Auto detect local currency by preference
 
 Branches correlate to different campuses
