@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, ArrowUpRight, BadgeCheck, Bell, BookOpen, Check, CheckCheck, ChevronRight, CreditCard, GraduationCap, Grid2X2, Heart, HelpCircle, Leaf, MapPin, Menu, MessageCircle, Plus, Search, Send, ShieldCheck, ShoppingBag, SlidersHorizontal, Sofa, Sparkles, Tag, Wallet, X, Headphones, Shirt, Lamp, Gift, Volume2, VolumeX } from 'lucide-react';
+import { ArrowRight, BadgeCheck, BookOpen, Check, CheckCheck, ChevronRight, Grid2X2, Heart, Leaf, MapPin, MessageCircle, Plus, Search, Send, ShieldCheck, Sofa, Sparkles, Wallet, X, Headphones, Shirt, Lamp, Gift, Volume2, VolumeX } from 'lucide-react';
 import { initialListings } from './data';
 import Marketplace, { SiteHeader, CategoryNav, SiteFooter } from './components/Marketplace';
 import './dorm.css';
@@ -12,9 +12,17 @@ import { figmaImage } from './figmaAssets';
 import { bootstrapSession, createConversation, createListing, deleteListing, depositTestCredits, getConversations, getExchangeRate, getListings, purchaseListing, sendChatMessage, subscribeToChats, updateProfile } from './api';
 import useReadAloud from './useReadAloud';
 
+function readStored(key, fallback) {
+  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
+  catch { return fallback; }
+}
+function writeStored(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch { /* Keep the session usable when browser storage is full or unavailable. */ }
+}
 function useStored(key, fallback, normalize = value => value) {
-  const [value, setValue] = useState(() => { try { return normalize(JSON.parse(localStorage.getItem(key)) ?? fallback); } catch { return fallback; } });
-  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Keep the session usable when browser storage is full or unavailable. */ } }, [key, value]);
+  const [value, setValue] = useState(() => { try { return normalize(readStored(key, fallback)); } catch { return fallback; } });
+  useEffect(() => { writeStored(key, value); }, [key, value]);
   return [value, setValue];
 }
 const categories = [['All finds', Grid2X2], ['Textbooks', BookOpen], ['Furniture', Sofa], ['Electronics', Headphones], ['Dorm essentials', Lamp], ['Clothing & more', Shirt], ['Free Stuff', Gift]];
@@ -58,8 +66,6 @@ export default function App() {
   const [toast, setToast] = useState('');
   const [maxPrice, setMaxPrice] = useState(10000);
   const [condition, setCondition] = useState('Any condition');
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [mobileNav, setMobileNav] = useState(false);
   const [activeChat, setActiveChat] = useState(null);
   const [messageText, setMessageText] = useState('');
   const [paymentDone, setPaymentDone] = useState(false);
@@ -72,12 +78,16 @@ export default function App() {
     return new Intl.NumberFormat(undefined, { style: 'currency', currency, minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value * rate);
   };
   const toastTimer = useRef();
+  const purchaseAttempts = useRef(new Map());
+  const purchaseInFlight = useRef(false);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
   const showToast = text => { setToast(text); clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(''), 3500); };
   const activateUser = user => {
-    const previousId = currentUser?.id || localStorage.getItem('dormio-active-user');
+    let previousId = currentUser?.id;
+    try { previousId ||= localStorage.getItem('dormio-active-user'); } catch { /* Storage may be unavailable. */ }
     if (previousId && previousId !== user.id) {
-      localStorage.setItem(`dormio-demo-state-${previousId}`, JSON.stringify({ transactions, saved, messages, preferences, listings }));
-      const cached = JSON.parse(localStorage.getItem(`dormio-demo-state-${user.id}`) || 'null');
+      writeStored(`dormio-demo-state-${previousId}`, { transactions, saved, messages, preferences, listings });
+      const cached = readStored(`dormio-demo-state-${user.id}`, null);
       setTransactions(cached?.transactions || []);
       setSaved(cached?.saved || []);
       setMessages(cached?.messages || []);
@@ -89,7 +99,7 @@ export default function App() {
       setActiveChat(null);
       setMessageText('');
     }
-    localStorage.setItem('dormio-active-user', user.id);
+    try { localStorage.setItem('dormio-active-user', user.id); } catch { /* Storage may be unavailable. */ }
     setCurrentUser(user);
   };
   const acceptSession = async ({ user, profile: serverProfile, account }) => {
@@ -213,7 +223,7 @@ export default function App() {
       setIdentityLoading(false);
     }
   };
-  const navigate = next => { setPage(next); setMobileNav(false); setSearch(''); setCategory('All finds'); };
+  const navigate = next => { setPage(next); setSearch(''); setCategory('All finds'); };
   const toggleSave = id => setSaved(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id]);
   const openDetail = item => { setSelected(item); setPaymentDone(false); setFormError(''); setModal('detail'); };
   const openSell = () => { setImagePreview(''); setFormError(''); setModal('sell'); };
@@ -265,17 +275,23 @@ export default function App() {
     setMessageText('');
   };
   const buyItem = async () => {
+    if (purchaseInFlight.current) return;
     if (checkoutMethod === 'stripe') { setFormError('Stripe checkout requires a backend integration.'); return; }
     if (checkoutMethod === 'wallet' && selected.price > balance) { setFormError('Your demo wallet does not have enough funds for this purchase.'); return; }
     if (transactions.some(tx => tx.listingId === selected.id && tx.status !== 'cancelled')) return;
     const transactionId = `LP-${Date.now().toString().slice(-7)}`;
     if (selected.serverBacked && checkoutMethod === 'wallet') {
+      const attemptKey = `${currentUser?.id}:${selected.id}`;
+      if (!purchaseAttempts.current.has(attemptKey)) purchaseAttempts.current.set(attemptKey, `purchase_${crypto.randomUUID().replaceAll('-', '')}`);
+      purchaseInFlight.current = true;
       try {
-        const result = await purchaseListing(selected.id, `purchase_${crypto.randomUUID().replaceAll('-', '')}`);
+        const result = await purchaseListing(selected.id, purchaseAttempts.current.get(attemptKey));
         setWalletAccount(result.account);
       } catch (error) {
         setFormError(error.message);
         return;
+      } finally {
+        purchaseInFlight.current = false;
       }
     }
     setTransactions(current => [{ id: transactionId, listingId: selected.id, title: selected.title, seller: selected.seller, amount: selected.price, method: checkoutMethod, serverSettled: Boolean(selected.serverBacked && checkoutMethod === 'wallet'), status: checkoutMethod === 'wallet' ? 'completed' : 'pending', date: new Date().toISOString() }, ...current]);
@@ -306,7 +322,6 @@ export default function App() {
   };
   const uploadImage = e => { const file = e.target.files[0]; if (!file) return; if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { setFormError('Choose a JPG, PNG, or WebP image.'); return; } if (file.size > 2000000) { setFormError('Choose an image smaller than 2 MB.'); return; } const reader = new FileReader(); reader.onload = () => { setImagePreview(reader.result); setFormError(''); }; reader.readAsDataURL(file); };
   const filtered = listings.filter(item => !item.sold && (page !== 'Saved items' || saved.includes(item.id)) && (page !== 'My listings' || item.own) && (category === 'All finds' || (category === 'Free Stuff' ? item.price === 0 : item.category === category)) && `${item.title} ${item.category}`.toLowerCase().includes(search.toLowerCase()) && item.price <= maxPrice && (condition === 'Any condition' || item.condition === condition)).sort((a, b) => sort === 'low' ? a.price - b.price : sort === 'high' ? b.price - a.price : sort === 'new' ? a.age - b.age : sort === 'popular' ? (b.likes || 0) - (a.likes || 0) : 0);
-  const nav = [['Explore', Grid2X2], ['Saved items', Heart], ['Messages', MessageCircle], ['My listings', Tag], ['My wallet', Wallet]];
   const serverChatItems = conversations.map(conversation => {
     const listing = listings.find(item => item.id === conversation.listing.id);
     return {

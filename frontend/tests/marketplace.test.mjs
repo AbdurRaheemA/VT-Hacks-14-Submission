@@ -22,6 +22,9 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
   }, configurable: true });
   const apiCalls = [];
   let profileOffline = false;
+  let depositOffline = true;
+  let purchaseOffline = true;
+  let remoteListings = [];
   Object.defineProperty(globalThis, 'fetch', { value: async (url, options = {}) => {
     apiCalls.push({ url, options });
     if (url === '/api/session') {
@@ -39,14 +42,21 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
       if (profile.name.toLowerCase() === 'john string') return Response.json({ switched: true, user: { id: 'john-user', accountId: 'john-account' }, profile: { ...profile, name: 'John String', bio: 'Existing John profile' }, account: { id: 'john-account', balance: 675 } });
       return Response.json({ user: { id: 'user-1', customerId: 'customer-1', accountId: 'account-1' }, profile });
     }
-    if (url === '/api/wallet/deposits') return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
+    if (url === '/api/wallet/deposits') {
+      if (depositOffline) return Response.json({ error: 'Wallet refresh failed. Try again.' }, { status: 502 });
+      return Response.json({ testMode: true, provider: 'venmo', account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 525 } }, { status: 201 });
+    }
     if (url === '/api/exchange-rate?currency=USD') return Response.json({ base: 'USD', quote: 'USD', rate: 1, date: null });
     if (url === '/api/exchange-rate?currency=EUR') return Response.json({ base: 'USD', quote: 'EUR', rate: 0.84, date: '2026-09-18' });
     if (url === '/api/listings' && options.method === 'POST') {
       const listing = JSON.parse(options.body);
       return Response.json({ listing: { id: '11111111-1111-4111-8111-111111111111', ...listing, sellerUserId: 'user-1', seller: 'Alex Rivera', campus: 'Virginia Tech', sold: false } }, { status: 201 });
     }
-    if (url === '/api/listings') return Response.json({ listings: [] });
+    if (url === '/api/listings') return Response.json({ listings: remoteListings });
+    if (url.endsWith('/purchase')) {
+      if (purchaseOffline) return Response.json({ error: 'Wallet refresh failed. Try again.' }, { status: 502 });
+      return Response.json({ order: { id: 'order-1', status: 'settled' }, account: { id: 'account-1', balance: 480 } }, { status: 201 });
+    }
     if (options.method === 'DELETE') return Response.json({ ok: true });
     return Response.json({ account: { id: 'account-1', nickname: 'Dorm.io demo wallet', balance: 500 } });
   }, configurable: true });
@@ -250,6 +260,11 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     await button('Add test credits');
     await click('input[name="deposit-provider"][value="venmo"]');
     await button('Add $25 with test Venmo');
+    assert.match(document.querySelector('[role="alert"]').textContent, /Wallet refresh failed/);
+    depositOffline = false;
+    await button('Add $25 with test Venmo');
+    const depositAttempts = apiCalls.filter(call => call.url === '/api/wallet/deposits');
+    assert.equal(JSON.parse(depositAttempts[0].options.body).checkoutId, JSON.parse(depositAttempts[1].options.body).checkoutId, 'retrying a failed deposit preserves the idempotency key');
     await act(async () => new Promise(resolve => setTimeout(resolve, 10)));
     assert.match(document.querySelector('.wallet-card').textContent, /\$480/);
     assert.match(document.querySelector('.deposit-activity').textContent, /Test credits deposited/);
@@ -270,6 +285,7 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.match(document.querySelector('.wallet-card').textContent, /\$225/);
     await click('[aria-label="Open profile settings"]');
     await type('[name="name"]', 'John String');
+    localStorage.setItem('dormio-demo-state-john-user', '{broken');
     await button('Save changes');
     assert.match(document.querySelector('.dorm-user').textContent, /John String/);
     assert.match(document.querySelector('.wallet-card').textContent, /\$675/, 'switching names replaces the wallet without subtracting prior demo purchases');
@@ -284,6 +300,26 @@ test('marketplace browsing, saved items, messaging, checkout, and persistence', 
     assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).language, 'es');
     assert.equal(JSON.parse(localStorage.getItem('dormio-profile')).currency, 'EUR');
     assert.match(document.querySelector('.wallet-card').textContent, /€567/);
+
+    // Exercise server-backed checkout through the actual App/API adapter.
+    await act(async () => root.unmount());
+    localStorage.clear();
+    remoteListings = [{ id: '22222222-2222-4222-8222-222222222222', title: 'Remote desk lamp', price: 20, category: 'Dorm essentials', condition: 'Good', description: 'A lamp.', sellerUserId: 'seller-2', seller: 'Sam Student', image: '/lamp.png', sold: false }];
+    root = createRoot(document.getElementById('root'));
+    await act(async () => root.render(createElement(App)));
+    await click('[aria-label="View Remote desk lamp"]');
+    await button('Make it yours');
+    await button('Pay $20');
+    assert.match(document.querySelector('[role="alert"]').textContent, /Wallet refresh failed/);
+    assert.equal(JSON.parse(localStorage.getItem('dormio-v1-transactions')).length, 0);
+    purchaseOffline = false;
+    await button('Pay $20');
+    const purchases = apiCalls.filter(call => call.url.endsWith('/purchase'));
+    assert.equal(purchases.length, 2);
+    assert.equal(JSON.parse(purchases[0].options.body).checkoutId, JSON.parse(purchases[1].options.body).checkoutId);
+    assert.match(document.querySelector('[role="dialog"]').textContent, /Good find/);
+    await button('View wallet activity');
+    assert.match(document.querySelector('.wallet-card').textContent, /\$480/, 'server purchases are not subtracted twice');
   } finally {
     if (root) await act(async () => root.unmount());
     await server.close();

@@ -23,6 +23,53 @@ Together, the palette and non-color cues help color-blind users distinguish inte
 
 The JavaScript backend includes a Nessie API wrapper and marketplace payment helpers. See [backend/README.md](backend/README.md) for setup and usage.
 
+## How the frontend and backend connect
+
+The React app calls relative `/api` URLs through `frontend/src/api.js`. During
+development, Vite proxies these requests to the Node server on port 3001.
+The server wires the HTTP handler to the JSON app store, Nessie client,
+marketplace settlement service, translation service, and currency service.
+
+| Feature | Source of truth and connection |
+| --- | --- |
+| Identity and profile | An HttpOnly session cookie identifies an app user. The JSON store maps that user to a Nessie customer, account, and merchant. |
+| Wallet and checkout | Nessie account and ledger reads determine the balance. Purchases debit the buyer and credit the seller; the JSON store retains order and retry records. |
+| Published listings | The API persists listings and ownership in the JSON store; the frontend merges these with bundled demo listings. |
+| Messaging | Server-backed conversations live in backend memory and stream over server-sent events. Translation failures fall back to the original message. |
+| Display currency | The backend caches exchange rates; the frontend converts displayed values while accounting remains in USD. |
+| Local demo state | Favorites, sample purchases, external-payment reservations, preferences, and profile photos use browser storage. |
+
+Wallet calculations are shared between the API and marketplace service. A failed
+ledger read fails the wallet request instead of silently displaying an incomplete
+balance. Payment checks and writes run through one queue in the single Node
+process, preventing concurrent duplicate deposits and sales. Results are saved
+before refreshing the displayed wallet, so retrying after a refresh failure does
+not charge again. Frontend retries retain their checkout IDs while the relevant
+UI remains mounted; a full reload does not preserve those pending IDs.
+
+### Regression checks
+
+Run `npm test` in `backend`, then `npm test` and `npm run build` in `frontend`.
+Backend tests cover sessions, ownership, persistence, payment concurrency,
+insufficient funds, retry recovery, upload boundaries, chat, and localization.
+The React/jsdom regression exercises browsing, profiles, storage, messaging,
+reservations, deposits, server-backed checkout, and payment retries.
+External services are mocked in these tests; they do not verify live credentials
+or current provider availability.
+
+### Remaining demo limitations
+
+- Selecting a matching display name can open that customer's wallet. This is
+  demo identity selection, not production authentication.
+- The JSON store and payment queue assume a single backend process. They do not
+  provide database transactions or atomic settlement with Nessie. A crash or
+  ambiguous upstream write failure can still require reconciliation.
+- Seller-credit failures are recorded for reconciliation; there is no automatic
+  reconciliation worker. Chat clears on backend restart.
+- External-payment reservations and sample purchases are local to the browser.
+  Production hosting needs an `/api` reverse proxy; the Vite development proxy
+  does not configure a deployed site.
+
 ### Brainstorming
 College student focused marketplace where you can sell old books, furniture, clothes, etc.
 

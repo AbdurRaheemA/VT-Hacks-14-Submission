@@ -156,6 +156,8 @@ function fixture({ purchaseItem, translationService, currencyService } = {}) {
   const store = createAppStore();
   return {
     calls,
+    nessie,
+    store,
     handler: createApiHandler({ nessie, marketplace, store, translationService, currencyService }),
   };
 }
@@ -209,6 +211,118 @@ test("creates one Nessie customer/account and resumes it from an HttpOnly sessio
   assert.equal(resumed.body.user.id, first.body.user.id);
   assert.equal(resumed.body.profile.name, "Alex Rivera");
   assert.equal(calls.createUsers.length, 1);
+});
+
+async function saleFixture(options) {
+  const context = fixture(options);
+  const { handler } = context;
+  const seller = await invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'Seller Student' } });
+  const buyer = await invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'Buyer Student' } });
+  const listingBody = { title: 'Desk lamp', price: 18.5, category: 'Dorm essentials', condition: 'Good', description: 'A desk lamp.', image: 'data:image/png;base64,iVBORw0KGgo=' };
+  const listing = await invoke(handler, { method: 'POST', path: '/api/listings', cookie: cookieFrom(seller), body: listingBody });
+  return { ...context, seller, buyer, listingBody, listingId: listing.body.listing.id };
+}
+
+test('concurrent deposit retries create only one credit', async () => {
+  const { handler, calls } = fixture();
+  const session = await invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'Buyer Student' } });
+  const input = { method: 'POST', path: '/api/wallet/deposits', cookie: cookieFrom(session), body: { amount: 25, provider: 'venmo', checkoutId: 'concurrent_deposit' } };
+  const results = await Promise.all([invoke(handler, input), invoke(handler, input)]);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  assert.equal(calls.deposits.length, 1);
+});
+
+test('a deposit survives a failed wallet refresh and rejects changed retry details', async () => {
+  const { handler, calls, nessie } = fixture();
+  const session = await invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'Buyer Student' } });
+  const input = { method: 'POST', path: '/api/wallet/deposits', cookie: cookieFrom(session), body: { amount: 25, provider: 'venmo', checkoutId: 'refresh_deposit' } };
+  nessie.deposits = { listByAccount: async () => { throw new Error('offline'); } };
+  assert.equal((await invoke(handler, input)).status, 502);
+  nessie.deposits.listByAccount = async () => [{ amount: 25, status: 'completed' }];
+  const retry = await invoke(handler, input);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.account.balance, 525);
+  assert.equal(calls.deposits.length, 1);
+  assert.equal((await invoke(handler, { ...input, body: { ...input.body, amount: 50 } })).status, 409);
+  assert.equal(calls.deposits.length, 1);
+});
+
+test('concurrent purchases cannot sell one listing twice', async () => {
+  const { handler, calls, buyer, listingId } = await saleFixture();
+  const results = await Promise.all(['first_checkout', 'second_checkout'].map(checkoutId => invoke(handler, {
+    method: 'POST', path: `/api/listings/${listingId}/purchase`, cookie: cookieFrom(buyer), body: { checkoutId },
+  })));
+  assert.deepEqual(results.map(result => result.status).sort(), [201, 409]);
+  assert.equal(calls.purchases.length, 1);
+});
+
+test('concurrent retries return the same purchase order', async () => {
+  const { handler, calls, buyer, listingId } = await saleFixture();
+  const input = { method: 'POST', path: `/api/listings/${listingId}/purchase`, cookie: cookieFrom(buyer), body: { checkoutId: 'same_checkout' } };
+  const results = await Promise.all([invoke(handler, input), invoke(handler, input)]);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  assert.equal(results[0].body.order.id, results[1].body.order.id);
+  assert.equal(calls.purchases.length, 1);
+});
+
+test('backend rejects purchases exceeding the available wallet balance', async () => {
+  const { handler, calls, buyer, listingId, store } = await saleFixture();
+  await store.updateListing(listingId, { price: 701 });
+  const result = await invoke(handler, { method: 'POST', path: `/api/listings/${listingId}/purchase`, cookie: cookieFrom(buyer), body: { checkoutId: 'expensive_checkout' } });
+  assert.equal(result.status, 409);
+  assert.equal(calls.purchases.length, 0);
+  assert.equal((await store.getListing(listingId)).sold, false);
+  await store.updateListing(listingId, { price: 20 });
+  assert.equal((await invoke(handler, { method: 'POST', path: `/api/listings/${listingId}/purchase`, cookie: cookieFrom(buyer), body: { checkoutId: 'affordable_checkout' } })).status, 201, 'a rejected payment does not block subsequent payments');
+});
+
+test('a checkout ID cannot be reused for a different listing', async () => {
+  const { handler, seller, buyer, listingId, listingBody, calls } = await saleFixture();
+  const input = { method: 'POST', path: `/api/listings/${listingId}/purchase`, cookie: cookieFrom(buyer), body: { checkoutId: 'reused_checkout' } };
+  assert.equal((await invoke(handler, input)).status, 201);
+  const other = await invoke(handler, { method: 'POST', path: '/api/listings', cookie: cookieFrom(seller), body: listingBody });
+  assert.equal((await invoke(handler, { ...input, path: `/api/listings/${other.body.listing.id}/purchase` })).status, 409);
+  assert.equal(calls.purchases.length, 1);
+});
+
+test('a failed wallet refresh after settlement cannot reopen or recharge the listing', async () => {
+  let failLedger = false;
+  let charges = 0;
+  const { handler, buyer, listingId, nessie, store } = await saleFixture({ purchaseItem: async () => {
+    charges += 1;
+    failLedger = true;
+    return { status: 'settled' };
+  } });
+  nessie.purchases = { listByAccount: async () => { if (failLedger) throw new Error('offline'); return []; } };
+  const input = { method: 'POST', path: `/api/listings/${listingId}/purchase`, cookie: cookieFrom(buyer), body: { checkoutId: 'refresh_checkout' } };
+  assert.equal((await invoke(handler, input)).status, 502);
+  assert.equal((await store.getListing(listingId)).sold, true);
+  failLedger = false;
+  assert.equal((await invoke(handler, input)).status, 200);
+  assert.equal(charges, 1);
+});
+
+test('wallet reads fail instead of displaying a balance from an incomplete ledger', async () => {
+  const { handler, nessie } = fixture();
+  const session = await invoke(handler, { method: 'POST', path: '/api/session', body: { name: 'Buyer Student' } });
+  nessie.purchases = { listByAccount: async () => { throw new Error('offline'); } };
+  assert.equal((await invoke(handler, { path: '/api/wallet', cookie: cookieFrom(session) })).status, 502);
+});
+
+test('listing uploads accept 2 MB of image bytes and reject larger images', async () => {
+  const { handler, seller, listingBody } = await saleFixture();
+  for (const [bytes, status] of [[2_000_000, 201], [2_000_001, 400]]) {
+    const result = await invoke(handler, { method: 'POST', path: '/api/listings', cookie: cookieFrom(seller), body: { ...listingBody, image: `data:image/png;base64,${Buffer.alloc(bytes).toString('base64')}` } });
+    assert.equal(result.status, status);
+  }
+});
+
+test('non-object JSON bodies and malformed session cookies receive client errors', async () => {
+  const { handler } = fixture();
+  for (const body of [null, [], 'text', 5, { profile: null }]) {
+    assert.equal((await invoke(handler, { method: 'POST', path: '/api/session', body })).status, 400);
+  }
+  assert.equal((await invoke(handler, { path: '/api/wallet', cookie: 'dormio_session=%zz' })).status, 401);
 });
 
 test("isolates wallet and profile operations by the current session", async () => {

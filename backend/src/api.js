@@ -2,6 +2,7 @@ import { randomUUID, randomBytes, createHash } from "node:crypto";
 import { normalizeName } from './app-store.js';
 import { supportedCurrencies } from "./currency.js";
 import { supportedLanguages } from "./translation.js";
+import { walletSnapshot as loadWalletSnapshot } from './wallet.js';
 
 const testProviders = new Set(["stripe", "venmo", "paypal", "cashapp"]);
 const sessionCookieName = "dormio_session";
@@ -31,23 +32,34 @@ function sendJson(response, status, body, headers = {}) {
 }
 
 async function readJson(request) {
-  let body = "";
+  const chunks = [];
+  let bytes = 0;
   for await (const chunk of request) {
-    body += chunk;
-    if (body.length > 2_500_000) throw new ApiError(413, "request body is too large.");
+    const buffer = Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 2_800_000) throw new ApiError(413, "request body is too large.");
+    chunks.push(buffer);
   }
+  let value;
   try {
-    return JSON.parse(body || "{}");
+    value = JSON.parse(Buffer.concat(chunks).toString('utf8') || "{}");
   } catch {
     throw new ApiError(400, "request body must be valid JSON.");
   }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(400, 'request body must be a JSON object.');
+  }
+  return value;
 }
 
 function cookieValue(request, name) {
   const cookie = request.headers?.cookie || "";
   for (const part of cookie.split(";")) {
     const [key, ...value] = part.trim().split("=");
-    if (key === name) return decodeURIComponent(value.join("="));
+    if (key === name) {
+      try { return decodeURIComponent(value.join("=")); }
+      catch { return undefined; }
+    }
   }
   return undefined;
 }
@@ -74,36 +86,9 @@ function publicAccount(account, balance = account.balance) {
   };
 }
 
-function completedTotal(items) {
-  return items
-    .filter((item) => !["cancelled", "pending"].includes(item.status))
-    .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-}
-
 async function walletSnapshot(nessie, accountId) {
-  const account = await nessie.accounts.get(accountId);
-  const loaders = [
-    nessie.deposits?.listByAccount?.(accountId),
-    nessie.withdrawals?.listByAccount?.(accountId),
-    nessie.purchases?.listByAccount?.(accountId),
-  ].map((request) => request ?? Promise.resolve([]));
-  const results = await Promise.allSettled(loaders);
-  const [deposits, withdrawals, purchases] = results.map((result) =>
-    result.status === "fulfilled" && Array.isArray(result.value) ? result.value : [],
-  );
-  const balance =
-    Number(account.balance) +
-    completedTotal(deposits) -
-    completedTotal(withdrawals) -
-    completedTotal(purchases);
-  return {
-    account: publicAccount(account, balance),
-    ledger: {
-      deposits: completedTotal(deposits),
-      withdrawals: completedTotal(withdrawals),
-      purchases: completedTotal(purchases),
-    },
-  };
+  const { account, ledger } = await loadWalletSnapshot(nessie, accountId);
+  return { account: publicAccount(account), ledger };
 }
 
 function text(value, fallback, maxLength) {
@@ -113,6 +98,9 @@ function text(value, fallback, maxLength) {
 }
 
 function validateProfile(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(400, 'profile must be a JSON object.');
+  }
   const language = Object.hasOwn(supportedLanguages, value.language) ? value.language : "en";
   const currency = supportedCurrencies.includes(value.currency) ? value.currency : "USD";
   return {
@@ -192,7 +180,7 @@ function validateListing(body) {
   if (
     typeof body.image !== "string" ||
     !/^data:image\/(jpeg|png|webp);base64,/.test(body.image) ||
-    body.image.length > 2_100_000
+    Buffer.from(body.image.slice(body.image.indexOf(',') + 1), 'base64').length > 2_000_000
   ) {
     throw new ApiError(400, "image must be a JPG, PNG, or WebP under 2 MB.");
   }
@@ -218,6 +206,13 @@ export function createApiHandler({
   if (!store) throw new TypeError("store is required.");
   // serialize identity changes in this single-process demo.
   let identityQueue = Promise.resolve();
+  // The JSON store is single-process: serialize payment checks and writes together.
+  let paymentQueue = Promise.resolve();
+  function paymentChange(work) {
+    const result = paymentQueue.then(work);
+    paymentQueue = result.catch(() => {});
+    return result;
+  }
   const conversations = new Map();
   const chatClients = new Map();
   function identityChange(work) {
@@ -517,26 +512,31 @@ export function createApiHandler({
       if (request.method === "POST" && url.pathname === "/api/wallet/deposits") {
         const user = await requireUser(request);
         const input = validateDeposit(await readJson(request));
-        const idempotencyKey = `${user.id}:${input.checkoutId}`;
-        const existing = await store.getIdempotency(idempotencyKey);
-        if (existing) {
-          sendJson(response, 200, existing);
-          return;
-        }
+        await paymentChange(async () => {
+          const idempotencyKey = `${user.id}:${input.checkoutId}`;
+          const existing = await store.getIdempotency(idempotencyKey);
+          if (existing) {
+            if (existing.provider !== input.provider || (existing.amount !== undefined && existing.amount !== input.amount)) {
+              throw new ApiError(409, 'checkoutId was already used for a different deposit.');
+            }
+            sendJson(response, 200, { ...existing, ...(await walletSnapshot(nessie, user.accountId)) });
+            return;
+          }
 
-        const deposit = await marketplace.addCredits(user.accountId, input.amount, {
-          description: `Test ${input.provider} wallet top-up [checkout:${input.checkoutId}]`,
+          const deposit = await marketplace.addCredits(user.accountId, input.amount, {
+            description: `Test ${input.provider} wallet top-up [checkout:${input.checkoutId}]`,
+          });
+          const result = {
+            testMode: true,
+            provider: input.provider,
+            checkoutId: input.checkoutId,
+            amount: input.amount,
+            deposit,
+            user: publicUser(user),
+          };
+          await store.putIdempotency(idempotencyKey, result);
+          sendJson(response, 201, { ...result, ...(await walletSnapshot(nessie, user.accountId)) });
         });
-        const result = {
-          testMode: true,
-          provider: input.provider,
-          checkoutId: input.checkoutId,
-          deposit,
-          user: publicUser(user),
-          ...(await walletSnapshot(nessie, user.accountId)),
-        };
-        await store.putIdempotency(idempotencyKey, result);
-        sendJson(response, 201, result);
         return;
       }
 
@@ -689,69 +689,61 @@ export function createApiHandler({
       const listingMatch = url.pathname.match(/^\/api\/listings\/([a-f0-9-]+)$/i);
       if (request.method === "DELETE" && listingMatch) {
         const user = await requireUser(request);
-        const listing = await store.getListing(listingMatch[1]);
-        if (!listing || listing.deletedAt) throw new ApiError(404, "listing not found.");
-        if (listing.sellerUserId !== user.id) {
-          throw new ApiError(403, "only the seller can remove this listing.");
-        }
-        await store.updateListing(listing.id, { deletedAt: new Date().toISOString() });
-        sendJson(response, 200, { ok: true });
+        await paymentChange(async () => {
+          const listing = await store.getListing(listingMatch[1]);
+          if (!listing || listing.deletedAt) throw new ApiError(404, "listing not found.");
+          if (listing.sellerUserId !== user.id) {
+            throw new ApiError(403, "only the seller can remove this listing.");
+          }
+          await store.updateListing(listing.id, { deletedAt: new Date().toISOString() });
+          sendJson(response, 200, { ok: true });
+        });
         return;
       }
 
       const purchaseMatch = url.pathname.match(/^\/api\/listings\/([a-f0-9-]+)\/purchase$/i);
       if (request.method === "POST" && purchaseMatch) {
         const buyer = await requireUser(request);
-        const listing = await store.getListing(purchaseMatch[1]);
-        if (!listing || listing.deletedAt) throw new ApiError(404, "listing not found.");
         const body = await readJson(request);
-        if (typeof body.checkoutId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.checkoutId)) {
-          throw new ApiError(400, "checkoutId is invalid.");
-        }
-        const idempotencyKey = `${buyer.id}:purchase:${body.checkoutId}`;
-        const existing = await store.getIdempotency(idempotencyKey);
-        if (existing) {
-          sendJson(response, 200, existing);
-          return;
-        }
-        if (listing.sellerUserId === buyer.id) {
-          throw new ApiError(400, "you cannot purchase your own listing.");
-        }
-        if (listing.sold) throw new ApiError(409, "listing has already been sold.");
-        const storedSeller = await store.getUser(listing.sellerUserId);
-        const seller = storedSeller ? await refreshUser(storedSeller) : undefined;
-        if (!seller?.merchantId || !seller?.accountId) {
-          throw new ApiError(409, "seller payment account is unavailable.");
-        }
+        await paymentChange(async () => {
+          const listing = await store.getListing(purchaseMatch[1]);
+          if (!listing || listing.deletedAt) throw new ApiError(404, "listing not found.");
+          if (typeof body.checkoutId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.checkoutId)) {
+            throw new ApiError(400, "checkoutId is invalid.");
+          }
+          const idempotencyKey = `${buyer.id}:purchase:${body.checkoutId}`;
+          const existing = await store.getIdempotency(idempotencyKey);
+          if (existing) {
+            if (existing.order.listingId !== listing.id) throw new ApiError(409, 'checkoutId was already used for another listing.');
+            sendJson(response, 200, { ...existing, ...(await walletSnapshot(nessie, buyer.accountId)) });
+            return;
+          }
+          if (listing.sellerUserId === buyer.id) {
+            throw new ApiError(400, "you cannot purchase your own listing.");
+          }
+          if (listing.sold) throw new ApiError(409, "listing has already been sold.");
+          const wallet = await walletSnapshot(nessie, buyer.accountId);
+          if (listing.price > wallet.account.balance) throw new ApiError(409, 'Your wallet does not have enough funds for this purchase.');
+          const storedSeller = await store.getUser(listing.sellerUserId);
+          const seller = storedSeller ? await refreshUser(storedSeller) : undefined;
+          if (!seller?.merchantId || !seller?.accountId) {
+            throw new ApiError(409, "seller payment account is unavailable.");
+          }
 
-        await store.updateListing(listing.id, { sold: true, saleStatus: "processing" });
-        try {
-          const settlement =
-            listing.price === 0
-              ? { status: "settled", purchase: null, sellerCredit: null }
-              : await marketplace.purchaseItem({
-                  buyerAccountId: buyer.accountId,
-                  sellerAccountId: seller.accountId,
-                  merchantId: seller.merchantId,
-                  amount: listing.price,
-                  itemId: listing.id,
-                });
-          const order = await store.createOrder({
-            id: randomUUID(),
-            checkoutId: body.checkoutId,
-            listingId: listing.id,
-            buyerUserId: buyer.id,
-            sellerUserId: seller.id,
-            amount: listing.price,
-            status: "settled",
-            createdAt: new Date().toISOString(),
-          });
-          await store.updateListing(listing.id, { saleStatus: "settled", orderId: order.id });
-          const result = { order, settlement, ...(await walletSnapshot(nessie, buyer.accountId)) };
-          await store.putIdempotency(idempotencyKey, result);
-          sendJson(response, 201, result);
-        } catch (error) {
-          if (error?.name === "MarketplaceSettlementError") {
+          await store.updateListing(listing.id, { sold: true, saleStatus: "processing" });
+          let charged = false;
+          try {
+            const settlement =
+              listing.price === 0
+                ? { status: "settled", purchase: null, sellerCredit: null }
+                : await marketplace.purchaseItem({
+                    buyerAccountId: buyer.accountId,
+                    sellerAccountId: seller.accountId,
+                    merchantId: seller.merchantId,
+                    amount: listing.price,
+                    itemId: listing.id,
+                  });
+            charged = true;
             const order = await store.createOrder({
               id: randomUUID(),
               checkoutId: body.checkoutId,
@@ -759,24 +751,40 @@ export function createApiHandler({
               buyerUserId: buyer.id,
               sellerUserId: seller.id,
               amount: listing.price,
-              status: "seller_credit_pending",
-              purchase: error.details?.purchase,
+              status: "settled",
               createdAt: new Date().toISOString(),
             });
-            await store.updateListing(listing.id, { saleStatus: "seller_credit_pending" });
-            const result = {
-              order,
-              settlement: { status: "seller_credit_pending" },
-              ...(await walletSnapshot(nessie, buyer.accountId)),
-            };
+            await store.updateListing(listing.id, { saleStatus: "settled", orderId: order.id });
+            const result = { order, settlement };
             await store.putIdempotency(idempotencyKey, result);
-            sendJson(response, 202, result);
-            return;
-          } else {
-            await store.updateListing(listing.id, { sold: false, saleStatus: undefined });
+            sendJson(response, 201, { ...result, ...(await walletSnapshot(nessie, buyer.accountId)) });
+          } catch (error) {
+            if (error?.name === "MarketplaceSettlementError") {
+              const order = await store.createOrder({
+                id: randomUUID(),
+                checkoutId: body.checkoutId,
+                listingId: listing.id,
+                buyerUserId: buyer.id,
+                sellerUserId: seller.id,
+                amount: listing.price,
+                status: "seller_credit_pending",
+                purchase: error.details?.purchase,
+                createdAt: new Date().toISOString(),
+              });
+              await store.updateListing(listing.id, { saleStatus: "seller_credit_pending" });
+              const result = {
+                order,
+                settlement: { status: "seller_credit_pending" },
+              };
+              await store.putIdempotency(idempotencyKey, result);
+              sendJson(response, 202, { ...result, ...(await walletSnapshot(nessie, buyer.accountId)) });
+              return;
+            } else if (!charged) {
+              await store.updateListing(listing.id, { sold: false, saleStatus: undefined });
+            }
+            throw error;
           }
-          throw error;
-        }
+        });
         return;
       }
 

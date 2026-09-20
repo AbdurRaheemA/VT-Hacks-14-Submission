@@ -1,3 +1,5 @@
+import { walletSnapshot } from './wallet.js';
+
 function positiveAmount(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new TypeError("amount must be a positive finite number.");
@@ -9,35 +11,6 @@ function dateOnly(value = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.valueOf())) throw new TypeError("date must be valid.");
   return date.toISOString().slice(0, 10);
-}
-
-function completedTotal(items) {
-  return items
-    .filter((item) => !["cancelled", "pending"].includes(item.status))
-    .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
-}
-
-async function walletSnapshot(nessie, accountId) {
-  const account = await nessie.accounts.get(accountId);
-  const [deposits, withdrawals, purchases] = await Promise.all([
-    nessie.deposits.listByAccount(accountId),
-    nessie.withdrawals.listByAccount(accountId),
-    nessie.purchases.listByAccount(accountId),
-  ]);
-  const ledger = {
-    deposits: completedTotal(deposits),
-    withdrawals: completedTotal(withdrawals),
-    purchases: completedTotal(purchases),
-  };
-  return {
-    account: {
-      ...account,
-      base_balance: Number(account.balance),
-      balance:
-        Number(account.balance) + ledger.deposits - ledger.withdrawals - ledger.purchases,
-    },
-    ledger,
-  };
 }
 
 async function customerCheckingAccount(nessie, customerId) {

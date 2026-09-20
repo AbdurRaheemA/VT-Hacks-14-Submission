@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ArrowRight, Banknote, Check, CreditCard, MessageCircle, Plus, ShieldCheck, Wallet } from 'lucide-react';
 
 export const paymentMethods = [
@@ -28,16 +28,24 @@ export function AddCredits({ onDeposit, formatMoney: displayMoney = formatMoney 
   const [amount, setAmount] = useState(25);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const attempt = useRef(null);
+  const inFlight = useRef(false);
   const submit = async event => {
     event.preventDefault();
+    if (inFlight.current) return;
+    inFlight.current = true;
     setSubmitting(true);
     setError('');
     try {
-      const checkoutId = `test_${crypto.randomUUID().replaceAll('-', '')}`;
-      await onDeposit({ amount, provider, checkoutId });
+      if (!attempt.current || attempt.current.amount !== amount || attempt.current.provider !== provider) {
+        attempt.current = { amount, provider, checkoutId: `test_${crypto.randomUUID().replaceAll('-', '')}` };
+      }
+      await onDeposit(attempt.current);
     } catch (depositError) {
       setError(depositError.message || 'The test deposit could not be completed.');
       setSubmitting(false);
+    } finally {
+      inFlight.current = false;
     }
   };
   return <form className="modal-body add-credits-form" onSubmit={submit}><div className="eyebrow">NESSIE · TEST MODE</div><h2 id="modal-title">Add credits to your wallet.</h2><p>Simulate buying marketplace credits through a test payment provider. No real payment account is contacted or charged.</p><fieldset className="payment-picker"><legend>Test payment method</legend>{providers.map(method => <label className={provider === method.id ? 'selected' : ''} key={method.id}><input type="radio" name="deposit-provider" value={method.id} checked={provider === method.id} onChange={() => setProvider(method.id)} /><PaymentMark method={method} /><span><strong>{method.name}</strong><small>Test purchase</small></span></label>)}</fieldset><fieldset className="credit-amounts"><legend>Choose an amount</legend>{[10, 25, 50, 100].map(value => <button className={amount === value ? 'selected' : ''} type="button" onClick={() => setAmount(value)} key={value}>{displayMoney(value)}</button>)}</fieldset><div className="test-payment-note"><ShieldCheck size={18} /><span><strong>Test checkout only</strong><small>The backend will record a real deposit in the Nessie simulation account.</small></span></div>{error && <p className="form-error" role="alert">{error}</p>}<button className="primary full-width" disabled={submitting}>{submitting ? 'Adding credits…' : `Add ${displayMoney(amount)} with test ${methodName(provider)}`}</button></form>;
